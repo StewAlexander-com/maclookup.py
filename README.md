@@ -45,6 +45,11 @@ or
 ```bash
 python3 maclookup.py
 ```
+or 
+
+**_If you have an iPhone_**, copy the `maclookup.py` and `oui.csv` to iCloud for easy use by the  Pythonista app for iPhone
+
+### During runtime
 
 When prompted, enter a MAC address in any of the supported formats. Type 'q' or 'quit' to exit the program.
 
