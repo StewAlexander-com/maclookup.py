@@ -21,7 +21,7 @@ maclookup.py is a Python script that allows you to quickly look up the manufactu
 ## Requirements
 
 - Python 3.x
-- CSV file containing MAC address OUI (Organizationally Unique Identifier) data named `oui.csv`
+- CSV file containing MAC address OUI (Organizationally Unique Identifier) data named `oui.csv` (provided)
 
 ## Installation
 
