@@ -5,13 +5,18 @@
  *  - Text input → deterministic fuzzy vendor search.
  *  - Caches the parsed structure in IndexedDB so cold loads don't re-parse the
  *    4-5 MB JSON; the service worker caches the raw file for offline use.
- *  - "Refresh data" button bypasses the service-worker cache when online.
+ *  - On startup (and on demand via "Refresh data") the app fetches the small
+ *    metadata.json sidecar with `cache: no-store`, compares content_hash with
+ *    the persisted copy, and only downloads the full registry when the deploy
+ *    is newer. Failures (offline, 404, parse error) keep the last good copy.
  */
 
 const DATA_URL = 'data/registry.json';
+const META_URL = 'data/metadata.json';
 const IDB_NAME = 'maclookup';
 const IDB_STORE = 'registry';
-const IDB_KEY = 'parsed-v1';
+const IDB_KEY = 'parsed-v2';
+const IDB_LEGACY_KEYS = ['parsed-v1'];
 
 const PREFIX_LEN = { 'MA-S': 9, 'MA-M': 7, 'MA-L': 6 };
 const REGISTRY_ORDER = ['MA-S', 'MA-M', 'MA-L'];
@@ -29,10 +34,9 @@ const els = {
 let state = {
   loaded: false,
   version: null,
+  contentHash: null,
   counts: { 'MA-L': 0, 'MA-M': 0, 'MA-S': 0 },
-  // registries[label] = { lookupMap: Map<assignment, entry>, list: entry[] }
   registries: {},
-  // Combined list for vendor search (entry = {registry, assignment, name, address, _key})
   searchIndex: [],
 };
 
@@ -47,12 +51,12 @@ function idbOpen() {
   });
 }
 
-async function idbGet() {
+async function idbGet(key = IDB_KEY) {
   try {
     const db = await idbOpen();
     return await new Promise((resolve, reject) => {
       const tx = db.transaction(IDB_STORE, 'readonly');
-      const req = tx.objectStore(IDB_STORE).get(IDB_KEY);
+      const req = tx.objectStore(IDB_STORE).get(key);
       req.onsuccess = () => resolve(req.result || null);
       req.onerror = () => reject(req.error);
     });
@@ -61,12 +65,24 @@ async function idbGet() {
   }
 }
 
-async function idbPut(value) {
+async function idbPut(value, key = IDB_KEY) {
   try {
     const db = await idbOpen();
     await new Promise((resolve, reject) => {
       const tx = db.transaction(IDB_STORE, 'readwrite');
-      tx.objectStore(IDB_STORE).put(value, IDB_KEY);
+      tx.objectStore(IDB_STORE).put(value, key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch (e) { /* non-fatal */ }
+}
+
+async function idbDelete(key) {
+  try {
+    const db = await idbOpen();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      tx.objectStore(IDB_STORE).delete(key);
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
     });
@@ -110,40 +126,61 @@ function parsePayload(payload) {
   }
   return {
     version: payload.version || null,
+    contentHash: payload.content_hash || null,
     counts: payload.counts || {},
     registries,
     searchIndex,
   };
 }
 
-async function fetchRegistry({ refresh = false } = {}) {
-  const url = refresh ? `${DATA_URL}?refresh=1&t=${Date.now()}` : DATA_URL;
-  const resp = await fetch(url, refresh ? { cache: 'no-store' } : {});
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+function bustUrl(url) {
+  // Force a fresh trip through every cache layer (service worker, HTTP, browser).
+  const sep = url.includes('?') ? '&' : '?';
+  return `${url}${sep}refresh=1&t=${Date.now()}`;
+}
+
+async function fetchMetadata({ force = false } = {}) {
+  const url = force ? bustUrl(META_URL) : META_URL;
+  const resp = await fetch(url, { cache: 'no-store' });
+  if (!resp.ok) throw new Error(`metadata HTTP ${resp.status}`);
   return await resp.json();
 }
 
-async function loadFromCache() {
-  const cached = await idbGet();
-  if (!cached || !cached.version) return false;
-  applyParsed(parsePayload(cached));
-  setStatus(`Loaded ${totalCount()} entries from cache.`, 'ok');
-  return true;
+async function fetchRegistry({ force = false } = {}) {
+  const url = force ? bustUrl(DATA_URL) : DATA_URL;
+  const resp = await fetch(url, force ? { cache: 'no-store' } : {});
+  if (!resp.ok) throw new Error(`registry HTTP ${resp.status}`);
+  return await resp.json();
 }
 
-async function loadFromNetwork({ refresh = false } = {}) {
-  setStatus(refresh ? 'Refreshing registry…' : 'Downloading registry…');
-  const payload = await fetchRegistry({ refresh });
+function payloadIsValid(payload) {
+  if (!payload || typeof payload !== 'object') return false;
+  if (!payload.registries || typeof payload.registries !== 'object') return false;
+  if (!payload.counts || typeof payload.counts !== 'object') return false;
+  // At least one registry must have rows; otherwise reject as corrupt.
+  const total = Object.values(payload.counts).reduce((a, b) => a + (b || 0), 0);
+  return total > 0;
+}
+
+async function loadCachedPayload() {
+  let cached = await idbGet(IDB_KEY);
+  if (!cached) {
+    // Migrate from previous cache key(s).
+    for (const k of IDB_LEGACY_KEYS) {
+      const legacy = await idbGet(k);
+      if (legacy) {
+        cached = legacy;
+        await idbPut(cached, IDB_KEY);
+        await idbDelete(k);
+        break;
+      }
+    }
+  }
+  return cached;
+}
+
+async function applyPayload(payload) {
   const parsed = parsePayload(payload);
-  applyParsed(parsed);
-  await idbPut(payload);
-  setStatus(
-    `${refresh ? 'Refreshed' : 'Loaded'} ${totalCount()} entries.`,
-    'ok',
-  );
-}
-
-function applyParsed(parsed) {
   state = { ...state, ...parsed, loaded: true };
   els.dataVersion.textContent = parsed.version || '—';
   els.refresh.disabled = false;
@@ -151,6 +188,59 @@ function applyParsed(parsed) {
 
 function totalCount() {
   return Object.values(state.counts).reduce((a, b) => a + (b || 0), 0);
+}
+
+// ----------------------- Sync / freshness -----------------------
+
+/**
+ * Compare local persisted data against the deployed bundle and update if
+ * different. Never wipes the cached copy on failure.
+ *
+ * @param {{force?: boolean}} opts force=true bypasses every cache layer.
+ * @returns {Promise<'updated'|'fresh'|'offline'|'failed'>}
+ */
+async function syncWithRemote({ force = false } = {}) {
+  if (!navigator.onLine) return 'offline';
+
+  let remoteMeta;
+  try {
+    remoteMeta = await fetchMetadata({ force });
+  } catch (e) {
+    return 'failed';
+  }
+
+  const sameHash =
+    state.loaded && state.contentHash && remoteMeta.content_hash &&
+    state.contentHash === remoteMeta.content_hash;
+
+  if (sameHash && !force) return 'fresh';
+
+  let payload;
+  try {
+    payload = await fetchRegistry({ force: true });
+  } catch (e) {
+    return 'failed';
+  }
+  if (!payloadIsValid(payload)) return 'failed';
+
+  // Sanity-check that the registry payload matches the metadata we fetched.
+  // If the deploy is mid-flight we might get mismatching files — fall back to
+  // the registry's own hash (it's self-describing) and don't trust the meta.
+  if (
+    remoteMeta.content_hash &&
+    payload.content_hash &&
+    remoteMeta.content_hash !== payload.content_hash &&
+    !force
+  ) {
+    // Mid-deploy: only persist if this is a real change from what we have.
+    if (state.contentHash && payload.content_hash === state.contentHash) {
+      return 'fresh';
+    }
+  }
+
+  await applyPayload(payload);
+  await idbPut(payload);
+  return 'updated';
 }
 
 // ----------------------- Lookup & search -----------------------
@@ -332,8 +422,16 @@ els.refresh.addEventListener('click', async () => {
     return;
   }
   els.refresh.disabled = true;
+  setStatus('Checking for updates…');
   try {
-    await loadFromNetwork({ refresh: true });
+    const result = await syncWithRemote({ force: true });
+    if (result === 'updated') {
+      setStatus(`Refreshed — ${totalCount()} entries.`, 'ok');
+    } else if (result === 'fresh') {
+      setStatus(`Already up to date — ${totalCount()} entries.`, 'ok');
+    } else {
+      setStatus('Refresh failed — keeping cached data.', 'warn');
+    }
     if (els.query.value) handleQuery(els.query.value);
   } catch (e) {
     setStatus(`Refresh failed: ${e.message}`, 'err');
@@ -342,8 +440,17 @@ els.refresh.addEventListener('click', async () => {
   }
 });
 
-window.addEventListener('online', () => {
-  if (state.loaded) setStatus(`${totalCount()} entries · online`, 'ok');
+window.addEventListener('online', async () => {
+  if (!state.loaded) return;
+  setStatus(`${totalCount()} entries · online`, 'ok');
+  // Opportunistic background sync when connectivity returns.
+  try {
+    const result = await syncWithRemote();
+    if (result === 'updated') {
+      setStatus(`Updated to latest — ${totalCount()} entries.`, 'ok');
+      if (els.query.value) handleQuery(els.query.value);
+    }
+  } catch (e) { /* keep cached data */ }
 });
 window.addEventListener('offline', () => {
   if (state.loaded) setStatus(`${totalCount()} entries · offline`, 'warn');
@@ -355,26 +462,33 @@ async function boot() {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }
 
-  // Try cache first for instant cold start, then refresh in background if online.
-  const hadCache = await loadFromCache();
-  if (hadCache) {
-    if (navigator.onLine) {
-      try {
-        await loadFromNetwork({ refresh: false });
-      } catch (e) {
-        // Stay on cached data.
-      }
-    }
+  // Phase 1: load cached copy for instant cold start.
+  const cached = await loadCachedPayload();
+  if (cached && payloadIsValid(cached)) {
+    await applyPayload(cached);
+    setStatus(`Loaded ${totalCount()} entries from cache.`, 'ok');
     if (els.query.value) handleQuery(els.query.value);
-    return;
   }
 
-  try {
-    await loadFromNetwork({ refresh: false });
+  // Phase 2: if online, check the deployed metadata sidecar and update if
+  // the content_hash differs from what we have locally. Failures here are
+  // non-fatal — we keep whatever we just loaded from cache.
+  if (navigator.onLine) {
+    if (!state.loaded) setStatus('Downloading registry…');
+    const result = await syncWithRemote();
+    if (result === 'updated') {
+      setStatus(`Loaded ${totalCount()} entries (latest).`, 'ok');
+    } else if (result === 'failed' && !state.loaded) {
+      setStatus('Could not load registry data.', 'err');
+      renderEmpty('Could not load registry data. Connect to the network and reload.');
+      return;
+    } else if (result === 'fresh' && state.loaded) {
+      setStatus(`${totalCount()} entries · up to date`, 'ok');
+    }
     if (els.query.value) handleQuery(els.query.value);
-  } catch (e) {
-    setStatus(`Failed to load registry: ${e.message}`, 'err');
-    renderEmpty('Could not load registry data. Connect to the network and reload.');
+  } else if (!state.loaded) {
+    setStatus('Offline and no cached data.', 'err');
+    renderEmpty('Offline and no cached data. Connect to the network and reload.');
   }
 }
 
