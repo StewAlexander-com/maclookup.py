@@ -60,6 +60,7 @@ let state = {
   searchIndex: [],
   persistent: true, // false if IndexedDB is unavailable / broken
   degradedReason: null,
+  lastSyncError: null,  // string — surfaces in console/UI when load actually fails
 };
 
 // Outstanding refresh, so we can cancel mid-flight and stay idempotent.
@@ -94,16 +95,22 @@ function probablyOffline() {
 // Wrap a promise with a timeout. Uses AbortController when supported so the
 // underlying fetch is actually cancelled; otherwise falls back to a passive
 // timeout where the original request keeps running but the caller gets
-// control back. Returns { signal, run(promiseFactory) } so callers can pass
-// the signal directly into fetch() when possible.
+// control back.
+//
+// Important: `disarm()` clears the timer WITHOUT aborting the signal — call
+// this once the operation has succeeded so any downstream consumers of the
+// same signal (e.g. response body streaming) aren't torn down. `abort()` is
+// the explicit cancel and tears everything down.
 function withTimeout(ms, label) {
   let timer;
   let aborted = false;
+  let disarmed = false;
 
   if (HAS_ABORT) {
     const ctrl = new AbortController();
     const timeoutPromise = new Promise((_, reject) => {
       timer = setTimeout(() => {
+        if (disarmed) return;
         aborted = true;
         try { ctrl.abort(); } catch (_) {}
         reject(new Error(`${label || 'request'} timed out after ${ms}ms`));
@@ -111,11 +118,9 @@ function withTimeout(ms, label) {
     });
     return {
       signal: ctrl.signal,
-      cancel: () => { try { ctrl.abort(); } catch (_) {} clearTimeout(timer); },
-      run(p) {
-        return Promise.race([p, timeoutPromise])
-          .finally(() => clearTimeout(timer));
-      },
+      disarm: () => { disarmed = true; clearTimeout(timer); },
+      abort: () => { try { ctrl.abort(); } catch (_) {} clearTimeout(timer); },
+      run(p) { return Promise.race([p, timeoutPromise]); },
       didAbort: () => aborted,
     };
   }
@@ -123,17 +128,16 @@ function withTimeout(ms, label) {
   // Fallback: passive timeout via Promise.race.
   const timeoutPromise = new Promise((_, reject) => {
     timer = setTimeout(() => {
+      if (disarmed) return;
       aborted = true;
       reject(new Error(`${label || 'request'} timed out after ${ms}ms`));
     }, ms);
   });
   return {
     signal: undefined,
-    cancel: () => clearTimeout(timer),
-    run(p) {
-      return Promise.race([p, timeoutPromise])
-        .finally(() => clearTimeout(timer));
-    },
+    disarm: () => { disarmed = true; clearTimeout(timer); },
+    abort: () => clearTimeout(timer),
+    run(p) { return Promise.race([p, timeoutPromise]); },
     didAbort: () => aborted,
   };
 }
@@ -177,7 +181,10 @@ function idbOpen() {
 
 function timedIdb(promise) {
   const t = withTimeout(IDB_OPEN_TIMEOUT_MS, 'IndexedDB');
-  return t.run(promise);
+  return t.run(promise).then(
+    (v) => { t.disarm(); return v; },
+    (e) => { t.disarm(); throw e; }
+  );
 }
 
 async function idbGet(key = IDB_KEY) {
@@ -231,6 +238,16 @@ async function idbDelete(key) {
       tx.onerror = () => reject(tx.error);
     });
   } catch (_) { /* non-fatal */ }
+}
+
+// Record sync failures so the UI/console can show *why* a load failed
+// instead of silently degrading. Logs at warn level so it actually shows up
+// in the devtools default view (info is filtered out by default in some
+// browsers).
+function recordSyncError(stage, err) {
+  const msg = (err && err.message) || String(err);
+  state.lastSyncError = `${stage}: ${msg}`;
+  try { console.warn('[maclookup] sync failed —', state.lastSyncError); } catch (_) {}
 }
 
 let warnedNoPersistence = false;
@@ -301,28 +318,39 @@ function bustUrl(url) {
 }
 
 async function fetchJson(url, { timeoutMs, noStore = true, label = 'fetch' } = {}) {
+  // One timeout covers both the request AND the body read: in the browser,
+  // `fetch()` resolves with headers only; the body is still streaming and
+  // aborting the controller between fetch() and resp.json() throws AbortError
+  // when the JSON parser tries to read the body. So we keep the timer armed
+  // until we have the parsed value, then `disarm()` (leave signal alone).
   const t = withTimeout(timeoutMs, label);
   const init = {};
   if (noStore) init.cache = 'no-store';
   if (t.signal) init.signal = t.signal;
+
   let resp;
   try {
     resp = await t.run(fetch(url, init));
-  } finally {
-    // The race may resolve first; cancel the underlying timer either way.
-    t.cancel();
+  } catch (e) {
+    t.abort();
+    throw e;
   }
   if (!resp || !resp.ok) {
+    t.abort();
     const code = resp ? resp.status : 'no-response';
     throw new Error(`${label} HTTP ${code}`);
   }
   // Parsing JSON can itself throw on malformed responses (truncated, HTML
   // error page, etc.). Wrap so the caller gets one consistent error.
+  let parsed;
   try {
-    return await resp.json();
+    parsed = await t.run(resp.json());
   } catch (e) {
-    throw new Error(`${label} parse error: ${e.message || e}`);
+    t.abort();
+    throw new Error(`${label} parse error: ${(e && e.message) || e}`);
   }
+  t.disarm();
+  return parsed;
 }
 
 async function fetchMetadata({ force = false } = {}) {
@@ -416,9 +444,13 @@ async function syncWithRemote({ force = false, signal } = {}) {
   try {
     remoteMeta = await fetchMetadata({ force });
   } catch (e) {
+    recordSyncError('metadata fetch', e);
     return 'failed';
   }
-  if (!metadataIsValid(remoteMeta)) return 'failed';
+  if (!metadataIsValid(remoteMeta)) {
+    recordSyncError('metadata validation', new Error('metadata missing required fields'));
+    return 'failed';
+  }
   if (signal && signal.aborted) return 'cancelled';
 
   const sameHash =
@@ -431,10 +463,16 @@ async function syncWithRemote({ force = false, signal } = {}) {
   try {
     payload = await fetchRegistry({ force: true });
   } catch (e) {
+    recordSyncError('registry fetch', e);
     return 'failed';
   }
   if (signal && signal.aborted) return 'cancelled';
-  if (!payloadIsValid(payload)) return 'failed';
+  if (!payloadIsValid(payload)) {
+    recordSyncError('registry validation', new Error('registry payload rejected as invalid'));
+    return 'failed';
+  }
+  // Clear the last error on success so stale messages don't linger.
+  state.lastSyncError = null;
 
   // Sanity-check that the registry payload matches the metadata we fetched.
   // If the deploy is mid-flight we might get mismatching files — fall back to
@@ -697,10 +735,11 @@ window.addEventListener('offline', () => {
   if (state.loaded) setStatus(`${totalCount()} entries · offline${statusSuffix()}`, 'warn');
 });
 
-// Catch otherwise-unhandled promise rejections so we don't dump red stack
-// traces in the console of users on flaky networks.
+// Catch otherwise-unhandled promise rejections so they don't dump raw stack
+// traces but DO show up in the console at warn level — we want to hear about
+// these in dev/QA, not silently swallow them.
 window.addEventListener('unhandledrejection', (ev) => {
-  try { console.info('[maclookup] unhandled rejection:', ev.reason && ev.reason.message || ev.reason); }
+  try { console.warn('[maclookup] unhandled rejection:', (ev.reason && ev.reason.message) || ev.reason); }
   catch (_) {}
 });
 
@@ -750,8 +789,9 @@ async function boot() {
     if (result === 'updated') {
       setStatus(`Loaded ${totalCount()} entries (latest).${statusSuffix()}`, 'ok');
     } else if (result === 'failed' && !state.loaded) {
-      setStatus('Could not load registry data.', 'err');
-      renderEmpty('Could not load registry data. Connect to the network and reload.');
+      const reason = state.lastSyncError ? ` (${state.lastSyncError})` : '';
+      setStatus(`Could not load registry data${reason}.`, 'err');
+      renderEmpty(`Could not load registry data${reason}. Connect to the network and reload.`);
       els.refresh.disabled = false; // let the user retry
       return;
     } else if (result === 'fresh' && state.loaded) {
