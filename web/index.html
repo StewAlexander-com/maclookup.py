@@ -41,13 +41,17 @@
     </section>
 
     <section id="results" aria-live="polite" aria-atomic="false"></section>
+    <noscript>
+      <p class="empty">This app requires JavaScript to do the offline lookup.</p>
+    </noscript>
   </main>
 
   <footer>
-    <div class="status" role="status">
+    <div class="status" role="status" aria-live="polite">
       <span id="status-text">Loading registry…</span>
       <button id="refresh" type="button" disabled
-              title="Fetch the latest IEEE registries (online only)">
+              title="Fetch the latest IEEE registries (online only)"
+              aria-label="Refresh registry data">
         Refresh data
       </button>
     </div>
