@@ -1,10 +1,38 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" dir="ltr">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#0b1020" />
-  <title>MAC Vendor Lookup</title>
+  <meta name="color-scheme" content="dark light" />
+
+  <title>Offline MAC Address Lookup — IEEE MA-L / MA-M / MA-S</title>
+  <meta name="description" content="Offline MAC address lookup across IEEE MA-L, MA-M, and MA-S registries. Longest-prefix match, fuzzy vendor search, installable PWA. No tracking, works without an internet connection." />
+  <meta name="robots" content="index, follow" />
+  <meta name="application-name" content="Offline MAC Address Lookup" />
+  <link rel="canonical" href="https://stewalexander-com.github.io/maclookup.py/" />
+
+  <!-- Open Graph (Facebook, LinkedIn, iMessage, WhatsApp, WeChat, Telegram, Signal…) -->
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Offline MAC Address Lookup" />
+  <meta property="og:title" content="Offline MAC Address Lookup" />
+  <meta property="og:description" content="Look up MAC vendors across IEEE MA-L / MA-M / MA-S — fully offline, installable PWA, no tracking." />
+  <meta property="og:url" content="https://stewalexander-com.github.io/maclookup.py/" />
+  <meta property="og:locale" content="en_US" />
+  <meta property="og:image" content="https://stewalexander-com.github.io/maclookup.py/icons/og-image.png" />
+  <meta property="og:image:secure_url" content="https://stewalexander-com.github.io/maclookup.py/icons/og-image.png" />
+  <meta property="og:image:type" content="image/png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:alt" content="Offline MAC Address Lookup — IEEE MA-L, MA-M, MA-S registries. Works offline." />
+
+  <!-- Twitter / X large image card -->
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Offline MAC Address Lookup" />
+  <meta name="twitter:description" content="Look up MAC vendors across IEEE MA-L / MA-M / MA-S — fully offline, installable PWA, no tracking." />
+  <meta name="twitter:image" content="https://stewalexander-com.github.io/maclookup.py/icons/og-image.png" />
+  <meta name="twitter:image:alt" content="Offline MAC Address Lookup — IEEE MA-L, MA-M, MA-S registries. Works offline." />
+
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
   <link rel="apple-touch-icon" href="icons/icon-192.png" />
@@ -12,19 +40,25 @@
 </head>
 <body>
   <header>
-    <h1>MAC Vendor Lookup</h1>
+    <div class="lang-bar">
+      <label class="lang-label" for="lang-select" data-i18n="language_label">Language</label>
+      <select id="lang-select" aria-label="Language" class="lang-select"></select>
+    </div>
+    <h1 data-i18n="hero_title">Offline MAC Address Lookup</h1>
     <p class="tagline">
-      Offline lookup across IEEE
+      <span data-i18n="tagline_prefix">Offline lookup across IEEE</span>
       <abbr title="OUI / 24-bit assignments">MA-L</abbr>,
-      <abbr title="28-bit assignments">MA-M</abbr>, and
-      <abbr title="OUI-36 / 36-bit assignments">MA-S</abbr> registries.
+      <abbr title="28-bit assignments">MA-M</abbr>,
+      <span data-i18n="and">and</span>
+      <abbr title="OUI-36 / 36-bit assignments">MA-S</abbr>
+      <span data-i18n="tagline_suffix">registries.</span>
     </p>
   </header>
 
   <main>
     <section class="lookup" aria-labelledby="lookup-h">
-      <h2 id="lookup-h" class="visually-hidden">Lookup</h2>
-      <label for="query" class="lbl">MAC address, prefix, or vendor name</label>
+      <h2 id="lookup-h" class="visually-hidden" data-i18n="lookup_heading">Lookup</h2>
+      <label for="query" class="lbl" data-i18n="input_label">MAC address, prefix, or vendor name</label>
       <input
         id="query"
         type="search"
@@ -32,9 +66,10 @@
         autocapitalize="off"
         spellcheck="false"
         placeholder="00:1A:7D…  or  cisco"
+        data-i18n-placeholder="input_placeholder"
         aria-describedby="query-hint"
       />
-      <p id="query-hint" class="hint">
+      <p id="query-hint" class="hint" data-i18n="input_hint">
         Hex input does a longest-prefix lookup (MA-S → MA-M → MA-L).
         Text input does fuzzy vendor search.
       </p>
@@ -42,25 +77,29 @@
 
     <section id="results" aria-live="polite" aria-atomic="false"></section>
     <noscript>
-      <p class="empty">This app requires JavaScript to do the offline lookup.</p>
+      <p class="empty" data-i18n="noscript">This app requires JavaScript to do the offline lookup.</p>
     </noscript>
   </main>
 
   <footer>
     <div class="status" role="status" aria-live="polite">
-      <span id="status-text">Loading registry…</span>
+      <span id="status-text" data-i18n="status_loading">Loading registry…</span>
       <button id="refresh" type="button" disabled
               title="Fetch the latest IEEE registries (online only)"
+              data-i18n-title="refresh_title"
+              data-i18n-aria-label="refresh_aria"
               aria-label="Refresh registry data">
-        Refresh data
+        <span data-i18n="refresh_button">Refresh data</span>
       </button>
     </div>
     <p class="version">
-      Data version: <span id="data-version">—</span> ·
-      <a href="https://github.com/StewAlexander-com/maclookup.py">source</a>
+      <span data-i18n="data_version_label">Data version:</span>
+      <span id="data-version">—</span> ·
+      <a href="https://github.com/StewAlexander-com/maclookup.py" data-i18n="source_link">source</a>
     </p>
   </footer>
 
+  <script src="i18n.js" type="module"></script>
   <script src="app.js" type="module"></script>
 </body>
 </html>
