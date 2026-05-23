@@ -150,6 +150,7 @@ class TestWebDataBundle(unittest.TestCase):
     """If the PWA data bundle is present, it must agree with the source CSVs."""
 
     BUNDLE = REPO_ROOT / "web" / "data" / "registry.json"
+    METADATA = REPO_ROOT / "web" / "data" / "metadata.json"
 
     def setUp(self):
         if not self.BUNDLE.exists():
@@ -173,6 +174,36 @@ class TestWebDataBundle(unittest.TestCase):
         with self.BUNDLE.open(encoding="utf-8") as f:
             payload = json.load(f)
         self.assertTrue(payload.get("version"), "bundle missing version field")
+
+    def test_bundle_has_content_hash_and_registry_hashes(self):
+        import json
+        import re
+        with self.BUNDLE.open(encoding="utf-8") as f:
+            payload = json.load(f)
+        sha256 = re.compile(r"^[0-9a-f]{64}$")
+        self.assertTrue(sha256.match(payload.get("content_hash") or ""),
+                        "bundle missing/invalid content_hash")
+        reg_hashes = payload.get("registry_hashes") or {}
+        for label, _path, _plen, _floor in REGISTRY_FIXTURES:
+            self.assertTrue(
+                sha256.match(reg_hashes.get(label) or ""),
+                f"bundle missing/invalid registry_hashes[{label}]"
+            )
+
+    def test_metadata_sidecar_matches_bundle(self):
+        import json
+        if not self.METADATA.exists():
+            self.skipTest("web/data/metadata.json not built")
+        with self.BUNDLE.open(encoding="utf-8") as f:
+            payload = json.load(f)
+        with self.METADATA.open(encoding="utf-8") as f:
+            meta = json.load(f)
+        self.assertEqual(meta.get("content_hash"), payload.get("content_hash"))
+        self.assertEqual(meta.get("counts"), payload.get("counts"))
+        self.assertEqual(meta.get("version"), payload.get("version"))
+        self.assertEqual(meta.get("registry_hashes"), payload.get("registry_hashes"))
+        self.assertNotIn("registries", meta,
+                         "metadata.json should not embed the full registries blob")
 
 
 if __name__ == "__main__":

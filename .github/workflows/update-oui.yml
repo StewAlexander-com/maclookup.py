@@ -44,14 +44,14 @@ jobs:
       - name: Detect changes
         id: diff
         run: |
-          if git diff --quiet -- oui.csv mam.csv oui36.csv web/data/registry.json; then
+          if git diff --quiet -- oui.csv mam.csv oui36.csv web/data/registry.json web/data/metadata.json; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "No registry changes."
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
             {
               echo "summary<<EOF"
-              git diff --numstat -- oui.csv mam.csv oui36.csv web/data/registry.json
+              git diff --numstat -- oui.csv mam.csv oui36.csv web/data/registry.json web/data/metadata.json
               echo "EOF"
             } >> "$GITHUB_OUTPUT"
           fi
