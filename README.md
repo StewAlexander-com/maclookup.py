@@ -67,6 +67,29 @@ The script expects an `oui.csv` file with the following column structure:
 3. Organization name
 4. Organization address
 
+## Keeping `oui.csv` up to date
+
+`oui.csv` is the IEEE MA-L registry mirror
+(`https://standards-oui.ieee.org/oui/oui.csv`). A GitHub Actions workflow
+(`.github/workflows/update-oui.yml`) refreshes it weekly and opens a PR when
+the file changes; PR creation (not direct push) keeps the update reviewable
+and runs the test suite first.
+
+To refresh locally:
+
+```bash
+python3 scripts/update_oui.py        # download + validate + write oui.csv
+python3 scripts/update_oui.py --check # validate upstream without writing
+python3 -m unittest discover -s tests
+```
+
+The updater rejects truncated or malformed downloads (header mismatch,
+row count below floor, or >2% shrink vs. the committed file).
+
+For the automated PR workflow to function, the repo's Settings → Actions →
+General must allow GitHub Actions to create pull requests. No additional
+secrets are required — the default `GITHUB_TOKEN` is sufficient.
+
 ## License
 
 This project is licensed under the GNU General Public License v3.0 - see the LICENSE file for details.
