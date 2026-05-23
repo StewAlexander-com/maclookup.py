@@ -16,4 +16,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.x"
-      - run: python3 -m unittest discover -s tests -v
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: JS syntax check
+        run: |
+          node --check web/app.js
+          node --check web/sw.js
+      - name: PWA fresh-load smoke test
+        run: node tests/web/fresh_load.mjs
+      - name: Python tests
+        run: python3 -m unittest discover -s tests -v
