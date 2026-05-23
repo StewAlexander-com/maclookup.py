@@ -1,0 +1,58 @@
+name: Deploy PWA to GitHub Pages
+
+# Deploys the static PWA in `web/` to GitHub Pages whenever main updates the
+# app shell or bundled registry data. No secrets are required - the default
+# GITHUB_TOKEN is sufficient.
+#
+# One-time maintainer setup: in repo Settings -> Pages, set "Source" to
+# "GitHub Actions". Until that is done, this workflow will not actually
+# publish a site.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - "oui.csv"
+      - "mam.csv"
+      - "oui36.csv"
+      - ".github/workflows/pages.yml"
+      - "scripts/build_web_data.py"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Rebuild PWA data bundle (in case CSVs changed)
+        run: python3 scripts/build_web_data.py
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

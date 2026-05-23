@@ -1,10 +1,12 @@
-name: Update oui.csv
+name: Update IEEE registries
 
-# Refreshes oui.csv from the IEEE registry and opens a PR if changes exist.
-# Opens a PR (never pushes to main directly) so updates are reviewable.
+# Refreshes oui.csv (MA-L), mam.csv (MA-M), and oui36.csv (MA-S) from the IEEE
+# registry, rebuilds the PWA data bundle, runs tests, and opens a PR if
+# anything changed. Opens a PR (never pushes to main directly) so updates are
+# reviewable.
 #
 # Required permissions (set below): `contents: write` to push the branch and
-# `pull-requests: write` to open the PR. No secrets are required — the default
+# `pull-requests: write` to open the PR. No secrets are required - the default
 # GITHUB_TOKEN is sufficient. The "Allow GitHub Actions to create and approve
 # pull requests" setting must be enabled under Settings -> Actions -> General.
 
@@ -30,8 +32,11 @@ jobs:
         with:
           python-version: "3.x"
 
-      - name: Download and validate latest OUI registry
-        run: python3 scripts/update_oui.py --output oui.csv
+      - name: Download and validate all IEEE registries
+        run: python3 scripts/update_registries.py
+
+      - name: Rebuild PWA data bundle
+        run: python3 scripts/build_web_data.py
 
       - name: Run tests against refreshed data
         run: python3 -m unittest discover -s tests -v
@@ -39,35 +44,42 @@ jobs:
       - name: Detect changes
         id: diff
         run: |
-          if git diff --quiet -- oui.csv; then
+          if git diff --quiet -- oui.csv mam.csv oui36.csv web/data/registry.json; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "No changes in oui.csv."
+            echo "No registry changes."
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
-            added=$(git diff --numstat -- oui.csv | awk '{print $1}')
-            removed=$(git diff --numstat -- oui.csv | awk '{print $2}')
-            echo "added=$added" >> "$GITHUB_OUTPUT"
-            echo "removed=$removed" >> "$GITHUB_OUTPUT"
+            {
+              echo "summary<<EOF"
+              git diff --numstat -- oui.csv mam.csv oui36.csv web/data/registry.json
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
           fi
 
       - name: Create pull request
         if: steps.diff.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v6
         with:
-          commit-message: "chore(data): refresh oui.csv from IEEE registry"
-          title: "chore(data): weekly oui.csv refresh"
+          commit-message: "chore(data): refresh IEEE MA-L / MA-M / MA-S registries"
+          title: "chore(data): weekly IEEE registry refresh"
           body: |
-            Automated refresh of `oui.csv` from the IEEE OUI registry
-            (`https://standards-oui.ieee.org/oui/oui.csv`).
+            Automated refresh of the IEEE registries:
 
-            * Lines added: ${{ steps.diff.outputs.added }}
-            * Lines removed: ${{ steps.diff.outputs.removed }}
+            * MA-L: `https://standards-oui.ieee.org/oui/oui.csv`
+            * MA-M: `https://standards-oui.ieee.org/oui28/mam.csv`
+            * MA-S: `https://standards-oui.ieee.org/oui36/oui36.csv`
 
-            Validated by `scripts/update_oui.py` (header check, row-count
+            Also rebuilds the PWA data bundle (`web/data/registry.json`).
+
+            ```text
+            ${{ steps.diff.outputs.summary }}
+            ```
+
+            Validated by `scripts/update_registries.py` (header check, row-count
             floor, shrink guard) and tests in `tests/test_maclookup.py`.
 
             Triggered by: `${{ github.event_name }}` on `${{ github.ref_name }}`.
-          branch: chore/update-oui
+          branch: chore/update-registries
           delete-branch: true
           labels: |
             data

@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="96" fill="#0b1020"/>
+  <g fill="none" stroke="#6ea8ff" stroke-width="22" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="76" y="116" width="360" height="280" rx="36"/>
+    <path d="M76 196 H436"/>
+    <path d="M156 116 V196"/>
+    <path d="M356 116 V196"/>
+  </g>
+  <g fill="#e7ecff" font-family="ui-monospace, Menlo, monospace" font-weight="700" text-anchor="middle">
+    <text x="256" y="172" font-size="46">MAC</text>
+    <text x="256" y="310" font-size="60">00:1A:7D</text>
+    <text x="256" y="370" font-size="40" fill="#6ea8ff">LOOKUP</text>
+  </g>
+</svg>
