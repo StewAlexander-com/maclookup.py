@@ -8,6 +8,12 @@ on:
 permissions:
   contents: read
 
+# Opt the official JavaScript actions (checkout, setup-python, setup-node, …)
+# into the Node 24 runtime so we don't keep seeing the Node 20 deprecation
+# warning. Safe to remove once GitHub flips the default.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -18,12 +24,15 @@ jobs:
           python-version: "3.x"
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
       - name: JS syntax check
         run: |
           node --check web/app.js
           node --check web/sw.js
+          node --check web/i18n.js
       - name: PWA fresh-load smoke test
         run: node tests/web/fresh_load.mjs
+      - name: PWA i18n smoke test
+        run: node tests/web/i18n_smoke.mjs
       - name: Python tests
         run: python3 -m unittest discover -s tests -v

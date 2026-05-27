@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1020"/>
+      <stop offset="1" stop-color="#1c2547"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <g transform="translate(80,90)" fill="none" stroke="#6ea8ff" stroke-width="10" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="0" y="0" width="220" height="170" rx="22"/>
+    <path d="M0 50 H220"/>
+    <path d="M50 0 V50"/>
+    <path d="M170 0 V50"/>
+  </g>
+  <g font-family="ui-monospace, Menlo, monospace" fill="#e7ecff" font-weight="800">
+    <text x="80" y="350" font-size="74">Offline MAC Address</text>
+    <text x="80" y="430" font-size="74">Lookup</text>
+  </g>
+  <g font-family="system-ui, -apple-system, Segoe UI, Roboto, sans-serif" fill="#8a94c0" font-weight="500">
+    <text x="80" y="490" font-size="30">IEEE MA-L · MA-M · MA-S registries · longest-prefix match · fuzzy vendor search</text>
+    <text x="80" y="540" font-size="26" fill="#6ea8ff">Works offline. No tracking. Installable PWA.</text>
+  </g>
+  <g font-family="ui-monospace, Menlo, monospace" fill="#6ea8ff" font-weight="700" text-anchor="end">
+    <text x="1120" y="540" font-size="36">00:1A:7D…</text>
+  </g>
+</svg>

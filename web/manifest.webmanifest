@@ -1,12 +1,15 @@
 {
-  "name": "MAC Vendor Lookup",
+  "name": "Offline MAC Address Lookup",
   "short_name": "MAC Lookup",
-  "description": "Offline IEEE MA-L / MA-M / MA-S vendor lookup with fuzzy search.",
+  "description": "Offline MAC address lookup across IEEE MA-L, MA-M, and MA-S registries. Longest-prefix match, fuzzy vendor search, installable PWA. Works offline.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
   "background_color": "#0b1020",
   "theme_color": "#0b1020",
+  "lang": "en",
+  "dir": "ltr",
+  "categories": ["utilities", "productivity", "developer"],
   "icons": [
     { "src": "icons/icon.svg", "type": "image/svg+xml", "sizes": "any", "purpose": "any maskable" },
     { "src": "icons/icon-192.png", "type": "image/png", "sizes": "192x192", "purpose": "any" },

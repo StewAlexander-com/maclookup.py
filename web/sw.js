@@ -18,7 +18,7 @@
  *   - Bump *_CACHE names when the on-disk format changes so older clients
  *     evict stale entries on activate.
  */
-const APP_SHELL_CACHE = 'maclookup-shell-v3';
+const APP_SHELL_CACHE = 'maclookup-shell-v4';
 const DATA_CACHE = 'maclookup-data-v3';
 
 // Hard ceiling on network-first data requests inside the SW. The browser
@@ -30,6 +30,7 @@ const SHELL_URLS = [
   './index.html',
   './styles.css',
   './app.js',
+  './i18n.js',
   './manifest.webmanifest',
   './icons/icon.svg',
 ];

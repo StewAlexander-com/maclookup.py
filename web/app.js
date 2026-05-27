@@ -574,15 +574,42 @@ function subsequenceMatch(haystack, needle) {
 
 // ----------------------- UI rendering -----------------------
 
+// Translate via i18n module if available, otherwise return the fallback as-is.
+// Keeping a thin local wrapper means status calls don't have to check for
+// window.i18n every time.
+function tr(key, fallback, ...args) {
+  try {
+    if (typeof window !== 'undefined' && window.i18n && typeof window.i18n.t === 'function') {
+      const out = window.i18n.t(key, ...args);
+      if (out && out !== key) return out;
+    }
+  } catch (_) { /* ignore */ }
+  // Local fallback formatting matches i18n.js {0}, {1}…
+  let s = fallback;
+  for (let i = 0; i < args.length; i++) {
+    s = s.split('{' + i + '}').join(String(args[i]));
+  }
+  return s;
+}
+
 function setStatus(text, cls = '') {
   els.statusText.textContent = text;
   els.statusText.className = cls;
+  // Remember the last status so we can re-render on language change.
+  state.lastStatus = { text, cls };
+}
+
+// For status calls that should be re-translatable when the user switches
+// languages, pass a render function instead of pre-computed text.
+function setStatusRender(fn, cls = '') {
+  state.lastStatusRender = { fn, cls };
+  setStatus(fn(), cls);
 }
 
 function statusSuffix() {
   // Append a "no persistence" badge to status messages when running in a
   // degraded storage mode, so the user knows refreshing won't stick.
-  if (!state.persistent) return ' · in-memory only';
+  if (!state.persistent) return ' · ' + tr('in_memory_only', 'in-memory only');
   return '';
 }
 
@@ -598,7 +625,7 @@ function renderEmpty(msg) {
 function renderResults(entries, { exact = false } = {}) {
   els.results.innerHTML = '';
   if (entries.length === 0) {
-    renderEmpty('No matches.');
+    renderEmpty(tr('no_matches', 'No matches.'));
     return;
   }
   const frag = document.createDocumentFragment();
@@ -642,7 +669,7 @@ function buildCard(entry, exact) {
 
 function handleQuery(value) {
   if (!state.loaded) {
-    renderEmpty('Registry still loading…');
+    renderEmpty(tr('registry_loading', 'Registry still loading…'));
     return;
   }
   const trimmed = value.trim();
@@ -657,7 +684,7 @@ function handleQuery(value) {
     if (hit) {
       renderResults([hit], { exact: true });
     } else {
-      renderEmpty(`No registry entry for prefix ${hex.slice(0, 9)}.`);
+      renderEmpty(tr('no_prefix', 'No registry entry for prefix {0}.', hex.slice(0, 9)));
     }
     return;
   }
@@ -684,7 +711,7 @@ els.refresh.addEventListener('click', async () => {
     try { activeRefresh.cancel(); } catch (_) {}
   }
   if (probablyOffline()) {
-    setStatus('Offline — cannot refresh.', 'warn');
+    setStatus(tr('offline_cannot_refresh', 'Offline — cannot refresh.'), 'warn');
     return;
   }
   els.refresh.disabled = true;
@@ -695,23 +722,23 @@ els.refresh.addEventListener('click', async () => {
   };
   activeRefresh = job;
 
-  setStatus('Checking for updates…');
+  setStatus(tr('checking_updates', 'Checking for updates…'));
   try {
     const result = await syncWithRemote({ force: true, signal: ctrl && ctrl.signal });
     if (activeRefresh !== job) return; // superseded
     if (result === 'updated') {
-      setStatus(`Refreshed — ${totalCount()} entries.${statusSuffix()}`, 'ok');
+      setStatus(tr('refreshed', 'Refreshed — {0} entries.', totalCount()) + statusSuffix(), 'ok');
     } else if (result === 'fresh') {
-      setStatus(`Already up to date — ${totalCount()} entries.${statusSuffix()}`, 'ok');
+      setStatus(tr('already_up_to_date', 'Already up to date — {0} entries.', totalCount()) + statusSuffix(), 'ok');
     } else if (result === 'cancelled') {
-      setStatus('Refresh cancelled.', 'warn');
+      setStatus(tr('refresh_cancelled', 'Refresh cancelled.'), 'warn');
     } else {
       // 'failed' or 'offline' — never clobber existing data.
-      setStatus(`Refresh failed — keeping cached data.${statusSuffix()}`, 'warn');
+      setStatus(tr('refresh_failed_keeping', 'Refresh failed — keeping cached data.') + statusSuffix(), 'warn');
     }
     if (els.query.value) handleQuery(els.query.value);
   } catch (e) {
-    setStatus(`Refresh failed: ${(e && e.message) || e}`, 'err');
+    setStatus(tr('refresh_failed', 'Refresh failed: {0}', (e && e.message) || e), 'err');
   } finally {
     if (activeRefresh === job) activeRefresh = null;
     els.refresh.disabled = false;
@@ -720,20 +747,31 @@ els.refresh.addEventListener('click', async () => {
 
 window.addEventListener('online', () => {
   if (!state.loaded) return;
-  setStatus(`${totalCount()} entries · online${statusSuffix()}`, 'ok');
+  setStatus(tr('entries_online', '{0} entries · online', totalCount()) + statusSuffix(), 'ok');
   // Opportunistic background sync when connectivity returns. We don't await
   // here — the page stays responsive and any failure is silent.
   syncWithRemote().then((result) => {
     if (result === 'updated') {
-      setStatus(`Updated to latest — ${totalCount()} entries.${statusSuffix()}`, 'ok');
+      setStatus(tr('updated_latest', 'Updated to latest — {0} entries.', totalCount()) + statusSuffix(), 'ok');
       if (els.query.value) handleQuery(els.query.value);
     }
   }).catch(() => { /* keep cached data */ });
 });
 
 window.addEventListener('offline', () => {
-  if (state.loaded) setStatus(`${totalCount()} entries · offline${statusSuffix()}`, 'warn');
+  if (state.loaded) setStatus(tr('entries_offline', '{0} entries · offline', totalCount()) + statusSuffix(), 'warn');
 });
+
+// Re-render the last status message when the user switches languages so the
+// visible text updates immediately. We re-evaluate translation rather than
+// keep raw English around.
+try {
+  window.addEventListener('i18n:changed', () => {
+    if (state.lastStatusRender && typeof state.lastStatusRender.fn === 'function') {
+      setStatus(state.lastStatusRender.fn(), state.lastStatusRender.cls);
+    }
+  });
+} catch (_) {}
 
 // Catch otherwise-unhandled promise rejections so they don't dump raw stack
 // traces but DO show up in the console at warn level — we want to hear about
@@ -764,7 +802,7 @@ async function boot() {
   if (cached && payloadIsValid(cached)) {
     try {
       await applyPayload(cached);
-      setStatus(`Loaded ${totalCount()} entries from cache.${statusSuffix()}`, 'ok');
+      setStatus(tr('loaded_from_cache', 'Loaded {0} entries from cache.', totalCount()) + statusSuffix(), 'ok');
       if (els.query.value) handleQuery(els.query.value);
     } catch (e) {
       // Corrupt cache that passed validation but failed during parse — wipe
@@ -778,7 +816,7 @@ async function boot() {
   // the content_hash differs from what we have locally. Failures here are
   // non-fatal — we keep whatever we just loaded from cache.
   if (!probablyOffline()) {
-    if (!state.loaded) setStatus('Downloading registry…');
+    if (!state.loaded) setStatus(tr('downloading', 'Downloading registry…'));
     let result;
     try {
       result = await syncWithRemote();
@@ -787,23 +825,23 @@ async function boot() {
     }
 
     if (result === 'updated') {
-      setStatus(`Loaded ${totalCount()} entries (latest).${statusSuffix()}`, 'ok');
+      setStatus(tr('loaded_latest', 'Loaded {0} entries (latest).', totalCount()) + statusSuffix(), 'ok');
     } else if (result === 'failed' && !state.loaded) {
       const reason = state.lastSyncError ? ` (${state.lastSyncError})` : '';
-      setStatus(`Could not load registry data${reason}.`, 'err');
-      renderEmpty(`Could not load registry data${reason}. Connect to the network and reload.`);
+      setStatus(tr('could_not_load', 'Could not load registry data{0}.', reason), 'err');
+      renderEmpty(tr('could_not_load_reload', 'Could not load registry data{0}. Connect to the network and reload.', reason));
       els.refresh.disabled = false; // let the user retry
       return;
     } else if (result === 'fresh' && state.loaded) {
-      setStatus(`${totalCount()} entries · up to date${statusSuffix()}`, 'ok');
+      setStatus(tr('up_to_date', '{0} entries · up to date', totalCount()) + statusSuffix(), 'ok');
     } else if (result === 'failed' && state.loaded) {
       // Stale-but-usable: we have a cached copy, but the live check failed.
-      setStatus(`${totalCount()} entries · using cached data${statusSuffix()}`, 'warn');
+      setStatus(tr('using_cached', '{0} entries · using cached data', totalCount()) + statusSuffix(), 'warn');
     }
     if (els.query.value) handleQuery(els.query.value);
   } else if (!state.loaded) {
-    setStatus('Offline and no cached data.', 'err');
-    renderEmpty('Offline and no cached data. Connect to the network and reload.');
+    setStatus(tr('offline_no_cache', 'Offline and no cached data.'), 'err');
+    renderEmpty(tr('offline_no_cache_reload', 'Offline and no cached data. Connect to the network and reload.'));
     els.refresh.disabled = false; // user might come back online
   }
 }
@@ -814,12 +852,12 @@ try {
   boot().catch((e) => {
     try { console.info('[maclookup] boot failed:', e && e.message || e); } catch (_) {}
     if (!state.loaded) {
-      setStatus('Failed to start up.', 'err');
-      renderEmpty('Failed to load. Try refreshing the page.');
+      setStatus(tr('failed_startup', 'Failed to start up.'), 'err');
+      renderEmpty(tr('failed_load_refresh', 'Failed to load. Try refreshing the page.'));
       els.refresh.disabled = false;
     }
   });
 } catch (e) {
   try { console.info('[maclookup] boot threw:', e && e.message || e); } catch (_) {}
-  setStatus('Failed to start up.', 'err');
+  setStatus(tr('failed_startup', 'Failed to start up.'), 'err');
 }

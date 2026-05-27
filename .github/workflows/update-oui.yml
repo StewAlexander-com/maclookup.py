@@ -20,6 +20,12 @@ permissions:
   contents: write
   pull-requests: write
 
+# Opt the official JavaScript actions into the Node 24 runtime so we don't get
+# the Node 20 deprecation warning in scheduled runs. Drop this env block once
+# Node 24 becomes the default.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   update:
     runs-on: ubuntu-latest
