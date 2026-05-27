@@ -23,21 +23,10 @@
   --mono:      ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
 }
 
-@media (prefers-color-scheme: light) {
-  :root {
-    --bg:       #f3f5fb;
-    --bg-grad:  #e8ecf7;
-    --panel:    #ffffff;
-    --panel-2:  #d9deef;
-    --fg:       #0b1230;
-    --muted:    #4d5783;
-    --accent:   #0066c0;
-    --accent-2: #c12477;
-    --accent-3: #5a3fcf;
-    --grid:     rgba(0, 102, 192, 0.06);
-    --grid-2:   rgba(90, 63, 207, 0.05);
-  }
-}
+/* Cyberpunk dark is the canonical look — explicitly NOT auto-flipping to a
+ * light palette when the OS reports `prefers-color-scheme: light`. The user
+ * asked for the dark/cyberpunk treatment by default. We still keep WCAG-AA
+ * contrast on text so readability holds for light-preferring users. */
 
 * { box-sizing: border-box; }
 
