@@ -627,6 +627,21 @@ function looksMacShaped(token) {
   return stripped.length >= 6 && stripped.length <= 12;
 }
 
+// When a separator-bearing token has no hex letters (a-f) at all — so it's
+// pure digits and could be confused with a phone number / part number /
+// IPv4 — require every separator-delimited group to be a uniform MAC group
+// size (all 2 chars or all 4 chars). Rejects '1-800-555-1234' (1/3/3/4)
+// while accepting '01:23:45:67:89:01' (2/2/2/2/2/2) and '0123.4567.8901'.
+function hasMacishGrouping(token) {
+  if (/[a-fA-F]/.test(token)) return true;
+  const groups = token.split(/[-:.]/);
+  if (groups.length < 2) return true;
+  const size = groups[0].length;
+  if (size !== 2 && size !== 4) return false;
+  for (const g of groups) if (g.length !== size) return false;
+  return true;
+}
+
 // Score a single token. Returns {hex, ocr} or null. OCR substitutions are
 // applied only when the token already looks MAC-shaped so vendor words like
 // "cisco" stay out of the lookup path.
@@ -635,7 +650,7 @@ function candidateFromToken(token) {
   if (HEX_ONLY_TEST.test(token) && token.length >= 6 && token.length <= 12) {
     return { hex: token.toUpperCase(), ocr: false };
   }
-  if (looksMacShaped(token)) {
+  if (looksMacShaped(token) && hasMacishGrouping(token)) {
     const stripped = token.replace(INNER_SEP_RE, '');
     if (HEX_ONLY_TEST.test(stripped) && stripped.length >= 6 && stripped.length <= 12) {
       return { hex: stripped.toUpperCase(), ocr: false };

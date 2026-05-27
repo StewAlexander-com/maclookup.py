@@ -105,6 +105,36 @@ def _all_hex(s: str) -> bool:
     return bool(s) and all(c in "0123456789ABCDEFabcdef" for c in s)
 
 
+def _has_hex_letter(s: str) -> bool:
+    """True if the string contains at least one hex letter (a-f)."""
+    return any(c in "abcdefABCDEF" for c in s)
+
+
+# Group sizes that real MAC formats use between separators. A token with
+# separators but no hex letters (pure digits — so a phone number or serial
+# could be confused for a MAC) must use one of these uniform group sizes;
+# this rejects shapes like 1-800-555-1234 (1/3/3/4) while accepting
+# 01:23:45:67:89:01 (2/2/2/2/2/2) and 0123.4567.8901 (4/4/4).
+_MAC_GROUP_SIZES = {2, 4}
+
+
+def _has_macish_grouping(token: str) -> bool:
+    """When a separator-bearing token has no hex letters (pure digits),
+    require every separator-delimited group to be a uniform MAC group size.
+
+    Tokens with at least one hex letter (a-f) are accepted as MAC-shaped
+    purely on length, since digits-only strings are the ones that collide
+    with phone numbers / part numbers / dotted IPv4-ish things.
+    """
+    if _has_hex_letter(token):
+        return True
+    groups = _INNER_SEP_RE.split(token)
+    if len(groups) < 2:
+        return True
+    sizes = {len(g) for g in groups}
+    return len(sizes) == 1 and sizes.issubset(_MAC_GROUP_SIZES)
+
+
 def _candidate_from_token(token: str) -> Optional[tuple]:
     """Score a single token. Returns ``(hex_only, used_ocr)`` or None.
 
@@ -117,7 +147,7 @@ def _candidate_from_token(token: str) -> Optional[tuple]:
     # Pure-hex blob in the right size range — no further work needed.
     if _all_hex(token) and 6 <= len(token) <= 12:
         return token.upper(), False
-    if _looks_mac_shaped(token):
+    if _looks_mac_shaped(token) and _has_macish_grouping(token):
         # Try as-is first (case where O/I/l aren't present).
         stripped = _INNER_SEP_RE.sub("", token)
         if _all_hex(stripped) and 6 <= len(stripped) <= 12:

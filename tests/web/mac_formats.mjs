@@ -159,6 +159,25 @@ assert(extractMacCandidate('face0123abcd') === 'FACE0123ABCD',
 // But a vendor-word query without 6+ contiguous hex stays out.
 assert(extractMacCandidate('face') === null, '4-letter face not a candidate');
 
+// ---- Hardening: phone numbers / mixed-size pure-digit tokens rejected ----
+// Real-world false positive: '1-800-555-1234' has hyphens and 11 digits
+// (all hex-valid) and used to clean to a fake MAC. The group-uniformity
+// guard rejects pure-digit tokens whose groups aren't all 2 or all 4 chars.
+const phones = [
+  '1-800-555-1234',
+  '(415) 555-1212',
+  '+44-20-7946-0958',
+];
+for (const phone of phones) {
+  assert(extractMacCandidate(phone) === null,
+         `phone number leaked as MAC: ${JSON.stringify(phone)}`);
+}
+// But genuine all-digit MACs (groups uniformly sized) must still resolve.
+assert(extractMacCandidate('01:23:45:67:89:01') === '012345678901',
+       'all-digit MAC with 2-char groups still resolves');
+assert(extractMacCandidate('0123.4567.8901') === '012345678901',
+       'all-digit Cisco-style MAC still resolves');
+
 // ---- isHexish gates correctly with hardening ----
 assert(isHexish('OO:1A:7D:AA:BB:CC') === true,
        'OCR-typo MAC routes to hex path');
