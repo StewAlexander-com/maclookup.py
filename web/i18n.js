@@ -63,6 +63,7 @@ const LOCALES = {
     in_memory_only: 'in-memory only',
     failed_startup: 'Failed to start up.',
     failed_load_refresh: 'Failed to load. Try refreshing the page.',
+    note_ocr: 'corrected O/0 or I/1 typo',
   },
   es: {
     _name: 'Español',
@@ -108,6 +109,7 @@ const LOCALES = {
     in_memory_only: 'solo en memoria',
     failed_startup: 'Error al iniciar.',
     failed_load_refresh: 'Error al cargar. Intenta recargar la página.',
+    note_ocr: 'se corrigió un error tipográfico O/0 o I/1',
   },
   fr: {
     _name: 'Français',
@@ -153,6 +155,7 @@ const LOCALES = {
     in_memory_only: 'mémoire uniquement',
     failed_startup: 'Échec du démarrage.',
     failed_load_refresh: 'Échec du chargement. Essayez de recharger la page.',
+    note_ocr: 'faute de frappe O/0 ou I/1 corrigée',
   },
   de: {
     _name: 'Deutsch',
@@ -198,6 +201,7 @@ const LOCALES = {
     in_memory_only: 'nur im Speicher',
     failed_startup: 'Start fehlgeschlagen.',
     failed_load_refresh: 'Laden fehlgeschlagen. Bitte Seite neu laden.',
+    note_ocr: 'Tippfehler O/0 oder I/1 korrigiert',
   },
   it: {
     _name: 'Italiano',
@@ -243,6 +247,7 @@ const LOCALES = {
     in_memory_only: 'solo in memoria',
     failed_startup: 'Avvio non riuscito.',
     failed_load_refresh: 'Caricamento fallito. Ricarica la pagina.',
+    note_ocr: 'corretto refuso O/0 o I/1',
   },
   pt: {
     _name: 'Português',
@@ -288,6 +293,7 @@ const LOCALES = {
     in_memory_only: 'apenas em memória',
     failed_startup: 'Falha ao iniciar.',
     failed_load_refresh: 'Falha ao carregar. Tente recarregar a página.',
+    note_ocr: 'corrigido erro de digitação O/0 ou I/1',
   },
   'zh-Hans': {
     _name: '简体中文',
@@ -333,6 +339,7 @@ const LOCALES = {
     in_memory_only: '仅内存',
     failed_startup: '启动失败。',
     failed_load_refresh: '加载失败。请尝试刷新页面。',
+    note_ocr: '已修正 O/0 或 I/1 的拼写错误',
   },
   'zh-Hant': {
     _name: '繁體中文 / 廣東話',
@@ -378,6 +385,7 @@ const LOCALES = {
     in_memory_only: '僅記憶體',
     failed_startup: '啟動失敗。',
     failed_load_refresh: '載入失敗。請嘗試重新整理頁面。',
+    note_ocr: '已修正 O/0 或 I/1 的拼字錯誤',
   },
   ja: {
     _name: '日本語',
@@ -423,6 +431,7 @@ const LOCALES = {
     in_memory_only: 'メモリのみ',
     failed_startup: '起動に失敗しました。',
     failed_load_refresh: '読み込みに失敗しました。ページを再読み込みしてください。',
+    note_ocr: 'O/0 または I/1 の入力ミスを訂正しました',
   },
   ko: {
     _name: '한국어',
@@ -468,6 +477,7 @@ const LOCALES = {
     in_memory_only: '메모리 전용',
     failed_startup: '시작 실패.',
     failed_load_refresh: '로드 실패. 페이지를 새로고침하세요.',
+    note_ocr: 'O/0 또는 I/1 오타를 수정했습니다',
   },
   hi: {
     _name: 'हिन्दी',
@@ -513,6 +523,7 @@ const LOCALES = {
     in_memory_only: 'केवल मेमोरी',
     failed_startup: 'शुरू होने में विफल।',
     failed_load_refresh: 'लोड विफल। पृष्ठ पुनः लोड करें।',
+    note_ocr: 'O/0 या I/1 की टाइपो ठीक की गई',
   },
   fil: {
     _name: 'Filipino / Tagalog',
@@ -558,6 +569,7 @@ const LOCALES = {
     in_memory_only: 'memory lang',
     failed_startup: 'Bigo ang pagsisimula.',
     failed_load_refresh: 'Bigo ang pag-load. Subukang i-reload ang pahina.',
+    note_ocr: 'naitama ang typo na O/0 o I/1',
   },
   ar: {
     _name: 'العربية',
@@ -603,6 +615,7 @@ const LOCALES = {
     in_memory_only: 'الذاكرة فقط',
     failed_startup: 'فشل البدء.',
     failed_load_refresh: 'فشل التحميل. حاول إعادة تحميل الصفحة.',
+    note_ocr: 'تم تصحيح خطأ O/0 أو I/1',
   },
 };
 

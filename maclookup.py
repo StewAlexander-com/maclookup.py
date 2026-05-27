@@ -17,7 +17,7 @@ from __future__ import annotations
 import csv
 import re
 from pathlib import Path
-from typing import Iterable, NamedTuple, Optional
+from typing import Iterable, List, NamedTuple, Optional
 
 REPO_ROOT = Path(__file__).resolve().parent
 DEFAULT_MAL_CSV = REPO_ROOT / "oui.csv"
@@ -37,7 +37,24 @@ class VendorRecord(NamedTuple):
     address: str
 
 
+class LookupResult(NamedTuple):
+    """Structured lookup result with provenance for the UI.
+
+    ``cleaned`` is the hex string (no separators, uppercase) that was used as
+    the lookup key. ``note`` is one of ``""``, ``"ocr"``, ``"partial"`` and
+    explains how the result was reached so the UI can show e.g. "matched by
+    24-bit prefix after cleanup".
+    """
+    record: Optional[VendorRecord]
+    cleaned: Optional[str]
+    note: str = ""
+
+
 _SEPARATORS_RE = re.compile(r"[-:.\s]")
+# Internal separators that may sit *inside* a MAC token (no whitespace).
+# Whitespace is treated as a token boundary instead, so two MACs pasted on
+# adjacent lines / separated by a space don't collapse into one over-long run.
+_INNER_SEP_RE = re.compile(r"[-:.]")
 # Common label prefixes shipped by switches/routers/OS dialogs. Stripped
 # case-insensitively before extraction.
 _LABEL_RE = re.compile(
@@ -45,11 +62,14 @@ _LABEL_RE = re.compile(
     r"ether(?:net)?(?:\s*address)?|physical\s*address|bia|burned[- ]?in[- ]?address)"
     r"\s*[:=]?\s*"
 )
-# Bracketing wrappers commonly seen around a MAC in CLI output.
-_WRAPPER_CHARS = "()[]<>{}\"'`,;"
-# A contiguous run of hex characters and the common separators (:, -, ., space).
-# Anchored extraction matches the *longest* such run anywhere in the input.
-_HEX_RUN_RE = re.compile(r"[0-9A-Fa-f]+(?:[-:.\s][0-9A-Fa-f]+)*")
+# Bracketing wrappers commonly seen around a MAC in CLI output. Tabs and
+# newlines act as boundaries too so multi-line pastes don't get merged.
+_WRAPPER_CHARS = "()[]<>{}\"'`,;\t\r\n"
+# Token: one or more hex (or OCR-likely O/I/l) characters, possibly with
+# internal :/-/.; pure whitespace is what separates tokens.
+_TOKEN_RE = re.compile(r"[0-9A-Fa-fOoIiLl\-:.]+")
+# Map of common OCR/keyboard mistakes for clearly-MAC-shaped tokens only.
+_OCR_FIX = str.maketrans({"O": "0", "o": "0", "I": "1", "l": "1", "L": "1"})
 
 
 def normalize_mac(mac_address: str) -> str:
@@ -68,37 +88,126 @@ def normalize_mac(mac_address: str) -> str:
     return _SEPARATORS_RE.sub("", mac_address).upper()
 
 
-def extract_mac_candidate(text: str) -> Optional[str]:
-    """Pull a MAC-shaped hex run out of free-form text.
+def _looks_mac_shaped(token: str) -> bool:
+    """Heuristic: token has MAC-style internal separators or is a likely MAC.
 
-    Returns the uppercase hex digits (no separators) of the longest
-    plausibly-MAC-shaped run in ``text``, or ``None`` if no run yields at
-    least 6 hex characters (the minimum needed to match any IEEE registry).
+    Used to gate OCR substitutions so we don't corrupt vendor words like
+    ``cisco``. A token qualifies if it contains ``:``, ``-`` or ``.`` (the
+    canonical MAC separators) AND the hex-or-OCR-only length is in 6-12.
+    """
+    if not _INNER_SEP_RE.search(token):
+        return False
+    stripped = _INNER_SEP_RE.sub("", token)
+    return 6 <= len(stripped) <= 12
 
-    Handles inputs like:
-      * "MAC Address: 00:1A:2B:3C:4D:5E"
-      * "(00-1A-2B-3C-4D-5E)"
-      * "ether 001a.2b3c.4d5e txqueuelen 1000"
-      * "  00 1A 2B  "
-      * "001A2B3C4D5E"
 
-    Strict-but-tolerant: discards runs whose hex-only length isn't a sensible
-    MAC/prefix size (6-12 hex chars) so a vendor name like ``3com`` or a long
-    hash isn't misread as a MAC.
+def _all_hex(s: str) -> bool:
+    return bool(s) and all(c in "0123456789ABCDEFabcdef" for c in s)
+
+
+def _candidate_from_token(token: str) -> Optional[tuple]:
+    """Score a single token. Returns ``(hex_only, used_ocr)`` or None.
+
+    A token must have MAC-like shape (either explicit separators or 6-12
+    pure-hex characters) to qualify. OCR substitutions are applied only when
+    the token already looks MAC-shaped, never to bare words.
+    """
+    if not token:
+        return None
+    # Pure-hex blob in the right size range — no further work needed.
+    if _all_hex(token) and 6 <= len(token) <= 12:
+        return token.upper(), False
+    if _looks_mac_shaped(token):
+        # Try as-is first (case where O/I/l aren't present).
+        stripped = _INNER_SEP_RE.sub("", token)
+        if _all_hex(stripped) and 6 <= len(stripped) <= 12:
+            return stripped.upper(), False
+        # Apply OCR fixups and re-check.
+        fixed = stripped.translate(_OCR_FIX)
+        if _all_hex(fixed) and 6 <= len(fixed) <= 12 and fixed != stripped:
+            return fixed.upper(), True
+    return None
+
+
+def _combine_whitespace_chunks(tokens: List[str]) -> Optional[tuple]:
+    """Merge adjacent short hex chunks like ``00 1A 2B 3C 4D 5E``.
+
+    Greedy from each starting position. Accepts a run of 2-6 consecutive
+    pure-hex tokens whose lengths sum to 6-12 hex chars. Returns the best
+    such run as ``(hex_only, False)`` or None.
+    """
+    best = ""
+    n = len(tokens)
+    for i in range(n):
+        if not _all_hex(tokens[i]):
+            continue
+        acc = ""
+        for j in range(i, min(i + 6, n)):
+            t = tokens[j]
+            if not _all_hex(t) or not (1 <= len(t) <= 4):
+                break
+            acc += t
+            if len(acc) > 12:
+                break
+            if 6 <= len(acc) <= 12 and len(acc) > len(best):
+                best = acc
+    return (best.upper(), False) if best else None
+
+
+def extract_mac_candidates(text: str) -> List[tuple]:
+    """Pull every plausible MAC-shaped candidate out of free-form text.
+
+    Returns a list of ``(hex_only_uppercase, used_ocr)`` tuples, ordered by
+    preference (explicit MAC shape with separators first, longer before
+    shorter). Duplicates are de-duplicated while preserving order.
     """
     if not text:
-        return None
-    # Strip common labels first so "MAC:" doesn't bleed into the candidate.
+        return []
     stripped = _LABEL_RE.sub(" ", text)
-    # Replace wrapper characters with spaces so they act as boundaries.
     stripped = stripped.translate({ord(c): " " for c in _WRAPPER_CHARS})
 
-    best = ""
-    for match in _HEX_RUN_RE.finditer(stripped):
-        hex_only = _SEPARATORS_RE.sub("", match.group(0))
-        if 6 <= len(hex_only) <= 12 and len(hex_only) > len(best):
-            best = hex_only
-    return best.upper() if best else None
+    raw_tokens = _TOKEN_RE.findall(stripped)
+    # Pull trailing junk off each token so "AA:BB:CC." → "AA:BB:CC".
+    cleaned = []
+    for tok in raw_tokens:
+        tok = tok.strip(".-:")
+        if tok:
+            cleaned.append(tok)
+
+    candidates: List[tuple] = []
+    seen = set()
+
+    def _add(item):
+        if item is None:
+            return
+        hex_only, used_ocr = item
+        if hex_only in seen:
+            return
+        seen.add(hex_only)
+        candidates.append(item)
+
+    for tok in cleaned:
+        _add(_candidate_from_token(tok))
+
+    # Also handle "00 1A 2B 3C 4D 5E" — space-separated nibble groups that
+    # don't survive token-by-token scoring because each chunk is only 2 hex
+    # chars (below the 6-char floor).
+    _add(_combine_whitespace_chunks(cleaned))
+
+    # Sort: prefer longest hex; prefer non-OCR over OCR within the same length.
+    candidates.sort(key=lambda c: (-len(c[0]), c[1]))
+    return candidates
+
+
+def extract_mac_candidate(text: str) -> Optional[str]:
+    """Backward-compatible single-candidate extractor.
+
+    Returns the uppercase hex (no separators) of the best plausible MAC-shaped
+    run in ``text``, or ``None``. See :func:`extract_mac_candidates` for the
+    multi-candidate version.
+    """
+    candidates = extract_mac_candidates(text)
+    return candidates[0][0] if candidates else None
 
 
 def _iter_csv(path: Path) -> Iterable[list[str]]:
@@ -134,6 +243,24 @@ def load_all(
     return bundle
 
 
+def _match_prefix(
+    hex_only: str,
+    registries: dict[str, dict[str, VendorRecord]],
+) -> Optional[VendorRecord]:
+    """Longest-prefix scan against an already-cleaned hex string."""
+    for registry in REGISTRY_ORDER:
+        table = registries.get(registry)
+        if not table:
+            continue
+        plen = REGISTRY_PREFIX_LEN[registry]
+        if len(hex_only) < plen:
+            continue
+        record = table.get(hex_only[:plen])
+        if record is not None:
+            return record
+    return None
+
+
 def lookup(
     mac_address: str,
     registries: Optional[dict[str, dict[str, VendorRecord]]] = None,
@@ -143,27 +270,56 @@ def lookup(
     Returns ``None`` if no registry contains a matching prefix. Pass a
     pre-loaded ``registries`` mapping to avoid re-reading CSVs on each call.
     """
+    return lookup_detailed(mac_address, registries).record
+
+
+def lookup_detailed(
+    mac_address: str,
+    registries: Optional[dict[str, dict[str, VendorRecord]]] = None,
+) -> LookupResult:
+    """Lookup with provenance (the cleaned hex and a note about how it matched).
+
+    Strategy:
+      1. Normalize the bare input. If it's already clean hex of usable length
+         and we get a longest-prefix hit, return immediately.
+      2. Otherwise pull candidates out of free-form text. Try each in order:
+         exact (no OCR) before OCR-fixed; longer prefix wins.
+      3. If a candidate matches, attach a ``note`` describing what we did
+         (``ocr`` for typo-corrected, ``partial`` if we had to drop down a
+         registry tier).
+    """
     if registries is None:
         registries = load_all()
-    normalized = normalize_mac(mac_address)
-    # If the raw input had labels/wrappers, normalize_mac will leave non-hex
-    # letters in place and the lookup will silently miss. Re-extract from
-    # free-form text so "MAC Address: 00:1a:..." still works.
-    if any(c not in "0123456789ABCDEF" for c in normalized):
-        candidate = extract_mac_candidate(mac_address)
-        if candidate:
-            normalized = candidate
-    for registry in REGISTRY_ORDER:
-        table = registries.get(registry)
-        if not table:
-            continue
-        prefix = normalized[: REGISTRY_PREFIX_LEN[registry]]
-        if len(prefix) < REGISTRY_PREFIX_LEN[registry]:
-            continue
-        record = table.get(prefix)
+
+    note = ""
+    normalized = normalize_mac(mac_address or "")
+    cleaned: Optional[str] = None
+    record: Optional[VendorRecord] = None
+
+    if _all_hex(normalized) and 6 <= len(normalized) <= 12:
+        cleaned = normalized
+        record = _match_prefix(normalized, registries)
+        if record is None:
+            note = "partial"
         if record is not None:
-            return record
-    return None
+            return LookupResult(record=record, cleaned=cleaned, note="")
+
+    # Fall back to free-form extraction. Try every candidate; first to hit
+    # wins. We sort non-OCR candidates ahead of OCR-fixed so a clean MAC is
+    # always preferred over a guess.
+    for hex_only, used_ocr in extract_mac_candidates(mac_address or ""):
+        candidate_record = _match_prefix(hex_only, registries)
+        if candidate_record is not None:
+            return LookupResult(
+                record=candidate_record,
+                cleaned=hex_only,
+                note="ocr" if used_ocr else "",
+            )
+        if cleaned is None:
+            cleaned = hex_only
+            note = "partial"
+
+    return LookupResult(record=record, cleaned=cleaned, note=note if cleaned else "")
 
 
 def search_oui(csv_file, mac_address):
@@ -241,23 +397,25 @@ def main():
             print("\nExiting...")
             break
 
-        normalized = normalize_mac(user_input)
-        # If the raw input had labels/wrappers around a MAC, prefer the
-        # extracted candidate for both the length check and the not-found
-        # display.
-        candidate = extract_mac_candidate(user_input)
-        if candidate:
-            normalized = candidate
-        if len(normalized) < 6 or any(c not in "0123456789ABCDEF" for c in normalized):
-            print(format_output("Error", "Need at least 6 hex characters"))
+        result = lookup_detailed(user_input, registries)
+        if result.cleaned is None:
+            print(format_output("Error",
+                                "Need at least 6 hex characters of a MAC "
+                                "or recognizable prefix"))
             continue
 
-        record = lookup(user_input, registries)
-        if record:
-            print(format_output("Found", _describe(record)))
+        if result.record is not None:
+            body = _describe(result.record)
+            if result.cleaned and result.cleaned != result.record.assignment:
+                body += f"\nInterpreted: {result.cleaned}"
+            if result.note == "ocr":
+                body += "\nNote: corrected O/0 or I/1 typo"
+            print(format_output("Found", body))
         else:
-            print(format_output("Not Found",
-                                f"No entry for {normalized[:9]}"))
+            msg = f"No entry for {result.cleaned[:9]}"
+            if result.note == "partial":
+                msg += "\n(too few hex chars or no matching prefix)"
+            print(format_output("Not Found", msg))
 
 
 if __name__ == "__main__":
