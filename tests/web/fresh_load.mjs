@@ -94,12 +94,25 @@ function makeDom() {
   };
 }
 
+// Some web-platform globals (notably `navigator` in Node >= 21) are exposed
+// as getter-only accessors on globalThis. Plain assignment throws there. Use
+// Object.defineProperty so we can replace them regardless of whether the
+// property is unset (Node 20) or a built-in getter (Node 22+/24+).
+function setGlobal(name, value) {
+  Object.defineProperty(globalThis, name, {
+    value,
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  });
+}
+
 async function loadApp({ haveIDB = false, baseUrl } = {}) {
   const dom = makeDom();
-  globalThis.document = dom.document;
-  globalThis.window = { addEventListener() {} };
-  globalThis.navigator = { onLine: true };
-  globalThis.indexedDB = haveIDB ? globalThis.__realIDB : undefined;
+  setGlobal('document', dom.document);
+  setGlobal('window', { addEventListener() {} });
+  setGlobal('navigator', { onLine: true });
+  setGlobal('indexedDB', haveIDB ? globalThis.__realIDB : undefined);
 
   // Redirect data/*.json fetches to the local HTTP server so abort semantics
   // are real (browser-style streaming). Node 18+ exposes fetch globally.

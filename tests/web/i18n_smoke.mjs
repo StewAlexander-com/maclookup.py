@@ -44,19 +44,35 @@ function makeDom() {
   };
 }
 
+// `navigator` is a getter-only accessor on globalThis in Node >= 21, so a
+// direct assignment throws. defineProperty works whether the global is unset
+// (Node 20) or a built-in getter (Node 22+/24+). We use the same helper for
+// every shim so behavior is uniform regardless of which globals the runtime
+// has already populated.
+function setGlobal(name, value) {
+  Object.defineProperty(globalThis, name, {
+    value,
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  });
+}
+
 async function loadI18n({ languages = ['en'] } = {}) {
-  globalThis.document = makeDom();
-  globalThis.window = {
+  setGlobal('document', makeDom());
+  setGlobal('window', {
     addEventListener() {},
     dispatchEvent() {},
-  };
-  globalThis.location = { href: 'http://localhost/', hash: '', search: '' };
-  globalThis.history = { replaceState() {} };
-  globalThis.navigator = { languages, language: languages[0] };
-  globalThis.localStorage = undefined;
-  globalThis.URL = URL;
-  globalThis.URLSearchParams = URLSearchParams;
-  globalThis.CustomEvent = class CustomEvent { constructor(n, o) { this.name = n; this.detail = o && o.detail; } };
+  });
+  setGlobal('location', { href: 'http://localhost/', hash: '', search: '' });
+  setGlobal('history', { replaceState() {} });
+  setGlobal('navigator', { languages, language: languages[0] });
+  setGlobal('localStorage', undefined);
+  setGlobal('URL', URL);
+  setGlobal('URLSearchParams', URLSearchParams);
+  setGlobal('CustomEvent', class CustomEvent {
+    constructor(n, o) { this.name = n; this.detail = o && o.detail; }
+  });
 
   const src = readFileSync(I18N_JS, 'utf8') + `\n//# salt=${Math.random()}\n`;
   await import('data:text/javascript;base64,' + Buffer.from(src).toString('base64'));
