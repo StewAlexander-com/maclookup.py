@@ -37,9 +37,68 @@ class VendorRecord(NamedTuple):
     address: str
 
 
+_SEPARATORS_RE = re.compile(r"[-:.\s]")
+# Common label prefixes shipped by switches/routers/OS dialogs. Stripped
+# case-insensitively before extraction.
+_LABEL_RE = re.compile(
+    r"(?i)\b(?:mac(?:\s*address)?|hardware\s*address|hwaddr|"
+    r"ether(?:net)?(?:\s*address)?|physical\s*address|bia|burned[- ]?in[- ]?address)"
+    r"\s*[:=]?\s*"
+)
+# Bracketing wrappers commonly seen around a MAC in CLI output.
+_WRAPPER_CHARS = "()[]<>{}\"'`,;"
+# A contiguous run of hex characters and the common separators (:, -, ., space).
+# Anchored extraction matches the *longest* such run anywhere in the input.
+_HEX_RUN_RE = re.compile(r"[0-9A-Fa-f]+(?:[-:.\s][0-9A-Fa-f]+)*")
+
+
 def normalize_mac(mac_address: str) -> str:
-    """Strip common separators and uppercase the input."""
-    return re.sub(r"[-:.\s]", "", mac_address).upper()
+    """Strip common separators and uppercase the input.
+
+    Accepts the bare formats users actually paste:
+      * Colon:        00:1A:2B:3C:4D:5E
+      * Hyphen/PC:    00-1A-2B-3C-4D-5E
+      * Cisco dotted: 001a.2b3c.4d5e
+      * Plain hex:    001A2B3C4D5E
+      * Spaces:       00 1A 2B 3C 4D 5E
+      * Lower/upper case mixed
+    For inputs that contain labels or wrappers (e.g. "MAC Address: 00-1a-..."),
+    use :func:`extract_mac_candidate` first.
+    """
+    return _SEPARATORS_RE.sub("", mac_address).upper()
+
+
+def extract_mac_candidate(text: str) -> Optional[str]:
+    """Pull a MAC-shaped hex run out of free-form text.
+
+    Returns the uppercase hex digits (no separators) of the longest
+    plausibly-MAC-shaped run in ``text``, or ``None`` if no run yields at
+    least 6 hex characters (the minimum needed to match any IEEE registry).
+
+    Handles inputs like:
+      * "MAC Address: 00:1A:2B:3C:4D:5E"
+      * "(00-1A-2B-3C-4D-5E)"
+      * "ether 001a.2b3c.4d5e txqueuelen 1000"
+      * "  00 1A 2B  "
+      * "001A2B3C4D5E"
+
+    Strict-but-tolerant: discards runs whose hex-only length isn't a sensible
+    MAC/prefix size (6-12 hex chars) so a vendor name like ``3com`` or a long
+    hash isn't misread as a MAC.
+    """
+    if not text:
+        return None
+    # Strip common labels first so "MAC:" doesn't bleed into the candidate.
+    stripped = _LABEL_RE.sub(" ", text)
+    # Replace wrapper characters with spaces so they act as boundaries.
+    stripped = stripped.translate({ord(c): " " for c in _WRAPPER_CHARS})
+
+    best = ""
+    for match in _HEX_RUN_RE.finditer(stripped):
+        hex_only = _SEPARATORS_RE.sub("", match.group(0))
+        if 6 <= len(hex_only) <= 12 and len(hex_only) > len(best):
+            best = hex_only
+    return best.upper() if best else None
 
 
 def _iter_csv(path: Path) -> Iterable[list[str]]:
@@ -87,6 +146,13 @@ def lookup(
     if registries is None:
         registries = load_all()
     normalized = normalize_mac(mac_address)
+    # If the raw input had labels/wrappers, normalize_mac will leave non-hex
+    # letters in place and the lookup will silently miss. Re-extract from
+    # free-form text so "MAC Address: 00:1a:..." still works.
+    if any(c not in "0123456789ABCDEF" for c in normalized):
+        candidate = extract_mac_candidate(mac_address)
+        if candidate:
+            normalized = candidate
     for registry in REGISTRY_ORDER:
         table = registries.get(registry)
         if not table:
@@ -164,7 +230,8 @@ def main():
         "MAC Vendor Lookup",
         "Supports MA-L / MA-M / MA-S\n"
         "Formats: 00:1A:7D, 00-1A-7D,\n"
-        "001A7D, 0000.0C12\n"
+        "001A7D, 0000.0C12,\n"
+        "MAC: 00:1A:7D:AA:BB:CC\n"
         f"Loaded: {loaded}\n"
         "Type 'q' to quit"))
 
@@ -175,7 +242,13 @@ def main():
             break
 
         normalized = normalize_mac(user_input)
-        if len(normalized) < 6:
+        # If the raw input had labels/wrappers around a MAC, prefer the
+        # extracted candidate for both the length check and the not-found
+        # display.
+        candidate = extract_mac_candidate(user_input)
+        if candidate:
+            normalized = candidate
+        if len(normalized) < 6 or any(c not in "0123456789ABCDEF" for c in normalized):
             print(format_output("Error", "Need at least 6 hex characters"))
             continue
 

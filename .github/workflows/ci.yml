@@ -34,5 +34,7 @@ jobs:
         run: node tests/web/fresh_load.mjs
       - name: PWA i18n smoke test
         run: node tests/web/i18n_smoke.mjs
+      - name: PWA MAC formats smoke test
+        run: node tests/web/mac_formats.mjs
       - name: Python tests
         run: python3 -m unittest discover -s tests -v

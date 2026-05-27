@@ -497,15 +497,61 @@ async function syncWithRemote({ force = false, signal } = {}) {
 
 // ----------------------- Lookup & search -----------------------
 
+const SEPARATORS_RE = /[-:.\s]/g;
+// Label prefixes shipped by switches/routers/OS dialogs that wrap a MAC.
+// Stripped before extraction so "MAC Address: 00:1a:..." normalizes cleanly.
+const LABEL_RE =
+  /\b(?:mac(?:\s*address)?|hardware\s*address|hwaddr|ether(?:net)?(?:\s*address)?|physical\s*address|bia|burned[- ]?in[- ]?address)\s*[:=]?\s*/gi;
+// Common wrapping characters around a MAC in CLI output / pasted text.
+const WRAPPER_CHARS_RE = /[()\[\]<>{}"'`,;]/g;
+// A contiguous run of hex characters and the common separators.
+const HEX_RUN_RE = /[0-9A-Fa-f]+(?:[-:.\s][0-9A-Fa-f]+)*/g;
+
 function normalizeMac(input) {
-  return input.replace(/[-:.\s]/g, '').toUpperCase();
+  return input.replace(SEPARATORS_RE, '').toUpperCase();
+}
+
+// Pull a MAC-shaped hex run out of free-form text. Mirrors the Python
+// extract_mac_candidate(): returns the longest plausibly-MAC-sized
+// (6-12 hex chars) run found, uppercased and stripped of separators, or
+// null if nothing qualifies.
+function extractMacCandidate(text) {
+  if (!text) return null;
+  const stripped = text
+    .replace(LABEL_RE, ' ')
+    .replace(WRAPPER_CHARS_RE, ' ');
+  let best = '';
+  let m;
+  HEX_RUN_RE.lastIndex = 0;
+  while ((m = HEX_RUN_RE.exec(stripped)) !== null) {
+    const hexOnly = m[0].replace(SEPARATORS_RE, '');
+    if (hexOnly.length >= 6 && hexOnly.length <= 12 && hexOnly.length > best.length) {
+      best = hexOnly;
+    }
+  }
+  return best ? best.toUpperCase() : null;
 }
 
 const HEX_RE = /^[0-9A-F]+$/;
 
+// Treat input as a MAC lookup if either (a) it's pure hex-with-separators
+// matching a MAC/prefix size, or (b) it has a labelled/wrapped MAC inside
+// it (e.g. "MAC Address: 00:1a:2b:3c:4d:5e", "(00-1A-...)", "ether 001a...").
+// The second branch is gated on the label/wrapper actually being present so
+// genuine vendor queries like "3com" or "Apple" stay in the fuzzy path.
 function isHexish(input) {
-  const stripped = input.replace(/[-:.\s]/g, '');
-  return stripped.length >= 6 && stripped.length <= 12 && HEX_RE.test(stripped.toUpperCase());
+  const stripped = input.replace(SEPARATORS_RE, '');
+  if (stripped.length >= 6 && stripped.length <= 12 && HEX_RE.test(stripped.toUpperCase())) {
+    return true;
+  }
+  const hasLabel = LABEL_RE.test(input);
+  LABEL_RE.lastIndex = 0; // reset because /g state is sticky
+  const hasWrapper = WRAPPER_CHARS_RE.test(input);
+  WRAPPER_CHARS_RE.lastIndex = 0;
+  if (hasLabel || hasWrapper) {
+    return extractMacCandidate(input) !== null;
+  }
+  return false;
 }
 
 function longestPrefixLookup(hex) {
@@ -679,7 +725,14 @@ function handleQuery(value) {
   }
 
   if (isHexish(trimmed)) {
-    const hex = normalizeMac(trimmed);
+    // If the raw input had a label/wrapper, normalizeMac alone would leave
+    // non-hex letters (e.g. "MACADDRESS001A2B"); prefer the extracted
+    // candidate so labelled inputs round-trip correctly.
+    let hex = normalizeMac(trimmed);
+    if (!HEX_RE.test(hex)) {
+      const candidate = extractMacCandidate(trimmed);
+      if (candidate) hex = candidate;
+    }
     const hit = longestPrefixLookup(hex);
     if (hit) {
       renderResults([hit], { exact: true });
