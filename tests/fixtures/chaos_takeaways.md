@@ -51,7 +51,7 @@ token has internal separators but contains **no hex letters (a–f)**,
 its separator-delimited groups must be sized like a MAC's (2, 4, or 6),
 and tokens with 4+ groups must additionally be uniformly sized.
 
-### 2. Bare-normalize fast path bypassed the guard (this PR)
+### 2. Bare-normalize fast path bypassed the guard (PR #14)
 
 After PR #13 shipped, the live PWA still showed `1-800-555-1234` as
 *"No registry entry for prefix 180055512"*. Root cause:
@@ -69,19 +69,43 @@ the fast path is allowed to surface a cleaned value. With the gate,
 phone-shaped inputs end up with `cleaned=None` so the UI shows no
 prefix message at all.
 
-The two defects are covered by:
+### 3. JS UI handler synthesized prefix from its own normalize_mac (PR #15)
+
+After PR #14 shipped, the live PWA *still* showed *"No registry entry
+for prefix 180055512"* for `1-800-555-1234`. The Python side and JS
+`macLookupDetailed` were both correctly returning `cleaned=null`, but
+two UI-layer functions in `web/app.js` were bypassing them:
+
+* `isHexish(input)` was deciding whether to enter the MAC path purely
+  on `stripped.length ∈ [6,12]` + hex-validity. Phone digits passed,
+  so the UI routed phone queries through `macLookupDetailed`.
+* `handleQuery`'s miss branch fell back to
+  `(cleaned || normalizeMac(trimmed)).slice(0, 9)` when `cleaned` was
+  null, which re-synthesized `180055512` from the phone and showed
+  it via `tr('no_prefix', ...)`.
+
+The fix routes phone/IP inputs to the fuzzy-vendor path instead:
+`isHexish` now consults `normalizedInputIsMacShaped`, so phone shapes
+return false; `handleQuery`'s miss branch only shows the prefix
+message when `cleaned` is actually set, otherwise it falls through to
+`fuzzyVendorSearch` (which renders an empty results state — the right
+outcome for a phone number).
+
+The three defects are covered by:
 
 * `tests/test_chaos_rig.py::test_no_phone_numbers_become_macs`
-  — now asserts both `extract_mac_candidates(...) == []` AND
-  `lookup_detailed(...).cleaned is None`
-* The `false-positive` category in the chaos corpus now includes the
-  bare phone shapes (`1-800-555-1234`, `555-1234`, `(415) 555-1212`,
+  — asserts `extract_mac_candidates(...) == []` AND
+  `lookup_detailed(...).cleaned is None` for every phone/IP probe.
+* The `false-positive` category in the chaos corpus includes the bare
+  phone shapes (`1-800-555-1234`, `555-1234`, `(415) 555-1212`,
   `+44-20-7946-0958`, `192.168.1.1`, `10.0.0.1`) as `expect=none`,
-  pinning `cleaned=None` so any future regression in the fast path
-  fails the rig.
+  pinning `cleaned=None` so any regression fails the rig.
 * `tests/web/mac_formats.mjs` directly exercises
-  `normalizedInputIsMacShaped`, `hasMacishGrouping`, and a simulated
-  `macLookupDetailed` to pin the same outcome on the JS side.
+  `normalizedInputIsMacShaped`, `hasMacishGrouping`, `isHexish`, a
+  simulated `macLookupDetailed`, AND a simulated `handleQuery` that
+  asserts phone/IP inputs route to the fuzzy path (never producing a
+  "prefix XYZ" line) while real-MAC misses still surface the prefix
+  message correctly.
 
 ## Things that work today and were worth pinning
 

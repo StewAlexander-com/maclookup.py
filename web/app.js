@@ -752,7 +752,11 @@ function extractMacCandidate(text) {
 // surface at least one candidate.
 function isHexish(input) {
   const stripped = input.replace(SEPARATORS_RE, '');
-  if (stripped.length >= 6 && stripped.length <= 12 && HEX_RE.test(stripped.toUpperCase())) {
+  if (
+    stripped.length >= 6 && stripped.length <= 12 &&
+    HEX_RE.test(stripped.toUpperCase()) &&
+    normalizedInputIsMacShaped(input)
+  ) {
     return true;
   }
   return extractMacCandidates(input).length > 0;
@@ -978,12 +982,19 @@ function handleQuery(value) {
       renderResults([hit], { exact: true, provenance: { cleaned, ocr } });
       flashHit();
       audio.hit();
-    } else {
-      const shown = (cleaned || normalizeMac(trimmed)).slice(0, 9);
-      renderEmpty(tr('no_prefix', 'No registry entry for prefix {0}.', shown));
+    } else if (cleaned) {
+      // We have a clean hex string that just didn't match any registry.
+      renderEmpty(tr('no_prefix', 'No registry entry for prefix {0}.',
+                     cleaned.slice(0, 9)));
       audio.miss();
+    } else {
+      // isHexish was true but the lookup couldn't surface a cleaned hex --
+      // the input shape doesn't actually look like a MAC (the gate vetoed
+      // the bare-normalize path and extract_mac_candidates was empty).
+      // Fall through to the fuzzy vendor path so the user gets a useful
+      // empty-state instead of a fake "no entry for prefix 18005551" line.
     }
-    return;
+    if (hit || cleaned) return;
   }
 
   const matches = fuzzyVendorSearch(trimmed, 50);
