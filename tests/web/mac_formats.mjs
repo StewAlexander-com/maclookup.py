@@ -280,4 +280,55 @@ assert(isHexish('00:1A:7D, 00:00:00:11:22:33') === true,
 assert(isHexish('see: 00:1A:7D:AA:BB:CC') === true,
        'arbitrary prose with embedded MAC routes to hex path');
 
+// ---- isHexish routes phone / IPv4 to the fuzzy-vendor path -----------
+// Live-PWA regression on PR #14: isHexish only checked stripped length
+// + hex-validity, so '1-800-555-1234' routed into the hex branch even
+// though macLookupDetailed returned cleaned=null, and the UI's fallback
+// at handleQuery synthesized 'prefix 180055512' from normalizeMac.
+for (const input of [
+  '1-800-555-1234',
+  '555-1234',
+  '(415) 555-1212',
+  '+44-20-7946-0958',
+  '192.168.1.1',
+  '10.0.0.1',
+]) {
+  assert(isHexish(input) === false,
+         `isHexish must route ${JSON.stringify(input)} to fuzzy path`);
+}
+
+// ---- UI-facing simulation: handleQuery decision for phone / IP --------
+// Replicate the relevant branch from app.js:handleQuery so we catch
+// regressions in BOTH isHexish AND the cleaned-fallback at once.
+function simulateHandleQuery(input) {
+  const trimmed = input.trim();
+  if (!trimmed) return { path: 'empty' };
+  if (isHexish(trimmed)) {
+    const r = simulatedLookup(trimmed);  // null/{cleaned}; no registry hit
+    if (r.cleaned) {
+      return { path: 'mac', message: `No registry entry for prefix ${r.cleaned.slice(0, 9)}.` };
+    }
+    // No cleaned -> the UI falls through to the fuzzy vendor path.
+  }
+  return { path: 'fuzzy' };
+}
+
+for (const phone of [
+  '1-800-555-1234',
+  '555-1234',
+  '(415) 555-1212',
+  '+44-20-7946-0958',
+  '192.168.1.1',
+  '10.0.0.1',
+]) {
+  const r = simulateHandleQuery(phone);
+  assert(r.path === 'fuzzy',
+         `handleQuery must route ${JSON.stringify(phone)} to fuzzy path, got ${JSON.stringify(r)}`);
+}
+// And real MAC misses still show the prefix-not-found line (no hit in
+// the stubbed lookup, but cleaned is set).
+const macMissProbe = simulateHandleQuery('FF:FF:FF:FF:FF:FF');
+assert(macMissProbe.path === 'mac' && /prefix FFFFFFFFF\./.test(macMissProbe.message),
+       `real-MAC miss should still show prefix message, got ${JSON.stringify(macMissProbe)}`);
+
 console.log('mac_formats.mjs OK');
