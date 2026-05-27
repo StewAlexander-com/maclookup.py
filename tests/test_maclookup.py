@@ -246,6 +246,107 @@ class TestMacFormats(unittest.TestCase):
         self.assertEqual(n("MAC: 00:1A:2B"), "MAC001A2B")
 
 
+class TestLookupHardening(unittest.TestCase):
+    """Forgiving lookup behavior for messy real-world inputs.
+
+    Goal: be useful under copy/paste from switches, BIOS pages, OCR'd photos,
+    and multi-line text — without misreading vendor words as MAC addresses.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.maclookup = _load_maclookup()
+        cls.registries = cls.maclookup.load_all()
+
+    def test_ocr_o_substitution_when_clearly_mac_shaped(self):
+        # User typed O instead of 0 in a clearly MAC-shaped token. The cleaned
+        # candidate ('001A7DAABBCC') is real (Xerox-ish coincidence aside),
+        # the matched assignment must equal the corrected prefix and the
+        # provenance note must call out the substitution.
+        r = self.maclookup.lookup_detailed("OO:1A:7D:AA:BB:CC", self.registries)
+        self.assertIsNotNone(r.record, "OCR-corrected MAC should resolve")
+        self.assertEqual(r.cleaned, "001A7DAABBCC")
+        self.assertEqual(r.note, "ocr")
+
+    def test_ocr_does_not_fire_for_plain_vendor_words(self):
+        # 'cisco' contains 'c' (hex) but no MAC separators and isn't 6-12
+        # contiguous hex — must NOT become a MAC candidate.
+        cands = self.maclookup.extract_mac_candidates("cisco")
+        self.assertEqual(cands, [])
+        cands = self.maclookup.extract_mac_candidates("Apple Inc")
+        self.assertEqual(cands, [])
+
+    def test_multiple_candidates_pasted_dont_collapse(self):
+        # Two MAC-like tokens separated by whitespace must NOT be merged into
+        # one over-long run. Both should appear in extract_mac_candidates().
+        text = "00:1A:7D:AA:BB:CC\n00:00:00:11:22:33"
+        cands = self.maclookup.extract_mac_candidates(text)
+        hexes = {c[0] for c in cands}
+        self.assertIn("001A7DAABBCC", hexes)
+        self.assertIn("000000112233", hexes)
+
+    def test_multiple_candidates_comma_separated(self):
+        text = "00:1A:7D:AA:BB:CC, 00:00:00:11:22:33"
+        cands = self.maclookup.extract_mac_candidates(text)
+        hexes = {c[0] for c in cands}
+        self.assertIn("001A7DAABBCC", hexes)
+        self.assertIn("000000112233", hexes)
+
+    def test_trailing_punctuation_stripped(self):
+        r = self.maclookup.lookup_detailed("00 1A 7D AA BB CC.", self.registries)
+        self.assertIsNotNone(r.record)
+        self.assertEqual(r.cleaned, "001A7DAABBCC")
+
+    def test_partial_prefix_too_short_returns_no_cleaned(self):
+        # 4 chars is below every registry's prefix length and isn't a
+        # candidate at all.
+        r = self.maclookup.lookup_detailed("001A", self.registries)
+        self.assertIsNone(r.record)
+        self.assertIsNone(r.cleaned)
+
+    def test_partial_prefix_unmatched_returns_cleaned_with_partial_note(self):
+        # 12 hex chars that don't match any registered prefix — we still want
+        # to surface the cleaned hex so the UI can show "no entry for X".
+        r = self.maclookup.lookup_detailed("dead.beef.cafe", self.registries)
+        self.assertIsNone(r.record)
+        self.assertEqual(r.cleaned, "DEADBEEFCAFE")
+        self.assertEqual(r.note, "partial")
+
+    def test_eight_hex_falls_through_to_mal(self):
+        # 8 hex chars: too short for MA-S (9), too short for MA-M (7)? Actually
+        # 8 >= 7 so MA-M is tried first, then MA-L (6). Picks whichever exists.
+        # 8C:1F:64 is a real MA-L holder (IEEE Registration Authority — it's
+        # the MA-L parent of all 8C:1F:64-prefixed MA-M/MA-S blocks).
+        r = self.maclookup.lookup_detailed("8C:1F:64:AF", self.registries)
+        self.assertIsNotNone(r.record)
+        self.assertEqual(r.record.registry, "MA-L")
+
+    def test_legacy_extract_mac_candidate_preserved(self):
+        f = self.maclookup.extract_mac_candidate
+        # All the cases from the original test still work.
+        self.assertEqual(f("00:1A:2B:3C:4D:5E"), "001A2B3C4D5E")
+        self.assertEqual(f("MAC: 00:1A:2B:3C:4D:5E"), "001A2B3C4D5E")
+        self.assertEqual(f("(00:1A:2B)"), "001A2B")
+        self.assertIsNone(f("3com"))
+        self.assertIsNone(f(""))
+
+    def test_lookup_function_still_returns_just_record(self):
+        # Backward-compat: lookup() returns a VendorRecord or None, not a
+        # LookupResult tuple.
+        rec = self.maclookup.lookup("00:00:00:11:22:33", self.registries)
+        self.assertIsNotNone(rec)
+        self.assertIn("XEROX", rec.organization.upper())
+
+    def test_labelled_input_with_ocr_typo(self):
+        # Worst-case combo: copied from a BIOS page with both a label and an
+        # OCR'd O/0 typo. Should still resolve.
+        r = self.maclookup.lookup_detailed(
+            "Physical Address. . . . . : OO-00-00-11-22-33", self.registries)
+        self.assertIsNotNone(r.record)
+        self.assertEqual(r.cleaned, "000000112233")
+        self.assertEqual(r.note, "ocr")
+
+
 class TestWebDataBundle(unittest.TestCase):
     """If the PWA data bundle is present, it must agree with the source CSVs."""
 

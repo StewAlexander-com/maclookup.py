@@ -42,9 +42,9 @@ const block = src.slice(startIdx, endIdx);
 // Evaluate inside a Function so we control the exports.
 const factory = new Function(`
   ${block}
-  return { normalizeMac, extractMacCandidate, isHexish };
+  return { normalizeMac, extractMacCandidate, extractMacCandidates, isHexish };
 `);
-const { normalizeMac, extractMacCandidate, isHexish } = factory();
+const { normalizeMac, extractMacCandidate, extractMacCandidates, isHexish } = factory();
 
 // ---- normalizeMac symmetry with the Python normalize_mac ----
 assert(normalizeMac('00:1A:2B:3C:4D:5E') === '001A2B3C4D5E', 'colon');
@@ -103,5 +103,68 @@ assert(isHexish('Apple') === false, 'isHexish Apple → false');
 assert(isHexish('3com') === false, 'isHexish 3com → false');
 assert(isHexish('intel corporation') === false,
        'isHexish vendor phrase → false');
+
+// ---- Hardening: OCR typos in clearly-MAC-shaped tokens ----
+const ocrCases = [
+  // [input, expected_hex, expected_ocr_flag]
+  ['OO:1A:7D:AA:BB:CC', '001A7DAABBCC', true],
+  ['oo:1a:7d:aa:bb:cc', '001A7DAABBCC', true],
+  ['IO:1A:7D:AA:BB:CC', '101A7DAABBCC', true],
+  // No separators, not MAC-shaped → no OCR fix, must stay rejected.
+];
+for (const [input, expected, ocrFlag] of ocrCases) {
+  const cands = extractMacCandidates(input);
+  assert(cands.length > 0, `OCR: expected candidate for ${JSON.stringify(input)}`);
+  assert(cands[0].hex === expected,
+         `OCR: ${JSON.stringify(input)} → ${cands[0].hex}, want ${expected}`);
+  assert(cands[0].ocr === ocrFlag,
+         `OCR: ${JSON.stringify(input)} ocr=${cands[0].ocr}, want ${ocrFlag}`);
+}
+
+// ---- Hardening: multiple MAC candidates pasted together ----
+const multi = extractMacCandidates('00:1A:7D:AA:BB:CC, 00:00:00:11:22:33');
+const multiHexes = multi.map((c) => c.hex);
+assert(multiHexes.includes('001A7DAABBCC'),
+       `multi-candidate missing 001A7DAABBCC: ${JSON.stringify(multiHexes)}`);
+assert(multiHexes.includes('000000112233'),
+       `multi-candidate missing 000000112233: ${JSON.stringify(multiHexes)}`);
+
+// Newline-separated MACs (common from pasted CLI output).
+const multiNL = extractMacCandidates('aa:bb:cc:dd:ee:ff\nfoo\n11:22:33:44:55:66');
+const multiNLHexes = multiNL.map((c) => c.hex);
+assert(multiNLHexes.includes('AABBCCDDEEFF'),
+       `newline-paste missing AABBCCDDEEFF: ${JSON.stringify(multiNLHexes)}`);
+assert(multiNLHexes.includes('112233445566'),
+       `newline-paste missing 112233445566: ${JSON.stringify(multiNLHexes)}`);
+
+// ---- Hardening: trailing/leading punctuation stripped ----
+assert(extractMacCandidate('00 1A 7D AA BB CC.') === '001A7DAABBCC',
+       'trailing dot stripped');
+assert(extractMacCandidate('001a.2b3c.') === '001A2B3C',
+       'trailing dot on cisco-style stripped');
+assert(extractMacCandidate('.00:1A:7D:AA:BB:CC') === '001A7DAABBCC',
+       'leading dot stripped');
+
+// ---- Hardening: ambiguous-too-short input rejected ----
+assert(extractMacCandidate('001A') === null, '4 hex chars below floor');
+assert(extractMacCandidate('00:1A') === null, '4 hex chars with colon below floor');
+assert(extractMacCandidate('a') === null, '1 char below floor');
+
+// ---- Hardening: pure-hex 12 chars that *isn't* a label-context input ----
+// "face0123abcd" — 12 hex chars, no other context. We DO surface it (the user
+// might be looking up a real MAC that coincidentally reads like a word) but
+// only when nothing else is more plausible.
+assert(extractMacCandidate('face0123abcd') === 'FACE0123ABCD',
+       'plain 12-hex string surfaced as a candidate');
+// But a vendor-word query without 6+ contiguous hex stays out.
+assert(extractMacCandidate('face') === null, '4-letter face not a candidate');
+
+// ---- isHexish gates correctly with hardening ----
+assert(isHexish('OO:1A:7D:AA:BB:CC') === true,
+       'OCR-typo MAC routes to hex path');
+assert(isHexish('00:1A:7D, 00:00:00:11:22:33') === true,
+       'multi-MAC paste routes to hex path');
+assert(isHexish('see: 00:1A:7D:AA:BB:CC') === true,
+       'arbitrary prose with embedded MAC routes to hex path');
 
 console.log('mac_formats.mjs OK');

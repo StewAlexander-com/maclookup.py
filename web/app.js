@@ -592,60 +592,131 @@ async function syncWithRemote({ force = false, signal } = {}) {
 // ----------------------- Lookup & search -----------------------
 
 const SEPARATORS_RE = /[-:.\s]/g;
+// Inner separators allowed *within* a MAC token. Whitespace is a token
+// boundary instead, so two MACs pasted on adjacent lines or separated by a
+// space don't collapse into one over-long run.
+const INNER_SEP_RE = /[-:.]/g;
 // Label prefixes shipped by switches/routers/OS dialogs that wrap a MAC.
 // Stripped before extraction so "MAC Address: 00:1a:..." normalizes cleanly.
 const LABEL_RE =
   /\b(?:mac(?:\s*address)?|hardware\s*address|hwaddr|ether(?:net)?(?:\s*address)?|physical\s*address|bia|burned[- ]?in[- ]?address)\s*[:=]?\s*/gi;
-// Common wrapping characters around a MAC in CLI output / pasted text.
-const WRAPPER_CHARS_RE = /[()\[\]<>{}"'`,;]/g;
-// A contiguous run of hex characters and the common separators.
-const HEX_RUN_RE = /[0-9A-Fa-f]+(?:[-:.\s][0-9A-Fa-f]+)*/g;
+// Common wrapping characters around a MAC in CLI output / pasted text. Tabs
+// and newlines also act as boundaries so multi-line pastes don't merge.
+const WRAPPER_CHARS_RE = /[()\[\]<>{}"'`,;\t\r\n]/g;
+// Token: hex digits plus OCR-likely O/I/l, with internal :/-/. — whitespace
+// boundaries between tokens are handled separately.
+const TOKEN_RE = /[0-9A-Fa-fOoIiLl\-:.]+/g;
+const HEX_RE = /^[0-9A-F]+$/;
+const HEX_ONLY_TEST = /^[0-9A-Fa-f]+$/;
 
 function normalizeMac(input) {
   return input.replace(SEPARATORS_RE, '').toUpperCase();
 }
 
-// Pull a MAC-shaped hex run out of free-form text. Mirrors the Python
-// extract_mac_candidate(): returns the longest plausibly-MAC-sized
-// (6-12 hex chars) run found, uppercased and stripped of separators, or
-// null if nothing qualifies.
-function extractMacCandidate(text) {
-  if (!text) return null;
+function ocrFix(s) {
+  // Only used on tokens that already look MAC-shaped (have internal separators).
+  return s
+    .replace(/[Oo]/g, '0')
+    .replace(/[IiLl]/g, '1');
+}
+
+function looksMacShaped(token) {
+  if (!INNER_SEP_RE.test(token)) { INNER_SEP_RE.lastIndex = 0; return false; }
+  INNER_SEP_RE.lastIndex = 0;
+  const stripped = token.replace(INNER_SEP_RE, '');
+  return stripped.length >= 6 && stripped.length <= 12;
+}
+
+// Score a single token. Returns {hex, ocr} or null. OCR substitutions are
+// applied only when the token already looks MAC-shaped so vendor words like
+// "cisco" stay out of the lookup path.
+function candidateFromToken(token) {
+  if (!token) return null;
+  if (HEX_ONLY_TEST.test(token) && token.length >= 6 && token.length <= 12) {
+    return { hex: token.toUpperCase(), ocr: false };
+  }
+  if (looksMacShaped(token)) {
+    const stripped = token.replace(INNER_SEP_RE, '');
+    if (HEX_ONLY_TEST.test(stripped) && stripped.length >= 6 && stripped.length <= 12) {
+      return { hex: stripped.toUpperCase(), ocr: false };
+    }
+    const fixed = ocrFix(stripped);
+    if (
+      HEX_ONLY_TEST.test(fixed) &&
+      fixed.length >= 6 && fixed.length <= 12 &&
+      fixed !== stripped
+    ) {
+      return { hex: fixed.toUpperCase(), ocr: true };
+    }
+  }
+  return null;
+}
+
+// Merge adjacent short hex chunks like "00 1A 2B 3C 4D 5E" that don't survive
+// token-by-token scoring because each chunk is below the 6-char floor.
+function combineWhitespaceChunks(tokens) {
+  let best = '';
+  for (let i = 0; i < tokens.length; i++) {
+    if (!HEX_ONLY_TEST.test(tokens[i])) continue;
+    let acc = '';
+    for (let j = i; j < Math.min(i + 6, tokens.length); j++) {
+      const t = tokens[j];
+      if (!HEX_ONLY_TEST.test(t) || t.length < 1 || t.length > 4) break;
+      acc += t;
+      if (acc.length > 12) break;
+      if (acc.length >= 6 && acc.length <= 12 && acc.length > best.length) {
+        best = acc;
+      }
+    }
+  }
+  return best ? { hex: best.toUpperCase(), ocr: false } : null;
+}
+
+// Return every plausible MAC-shaped candidate, sorted preference-first
+// (longer wins; non-OCR ahead of OCR within the same length).
+function extractMacCandidates(text) {
+  if (!text) return [];
   const stripped = text
     .replace(LABEL_RE, ' ')
     .replace(WRAPPER_CHARS_RE, ' ');
-  let best = '';
-  let m;
-  HEX_RUN_RE.lastIndex = 0;
-  while ((m = HEX_RUN_RE.exec(stripped)) !== null) {
-    const hexOnly = m[0].replace(SEPARATORS_RE, '');
-    if (hexOnly.length >= 6 && hexOnly.length <= 12 && hexOnly.length > best.length) {
-      best = hexOnly;
-    }
+
+  const raw = stripped.match(TOKEN_RE) || [];
+  const cleaned = [];
+  for (const t of raw) {
+    const trimmed = t.replace(/^[.\-:]+/, '').replace(/[.\-:]+$/, '');
+    if (trimmed) cleaned.push(trimmed);
   }
-  return best ? best.toUpperCase() : null;
+
+  const seen = new Set();
+  const out = [];
+  function add(item) {
+    if (!item || seen.has(item.hex)) return;
+    seen.add(item.hex);
+    out.push(item);
+  }
+  for (const tok of cleaned) add(candidateFromToken(tok));
+  add(combineWhitespaceChunks(cleaned));
+
+  out.sort((a, b) => (b.hex.length - a.hex.length) || (Number(a.ocr) - Number(b.ocr)));
+  return out;
 }
 
-const HEX_RE = /^[0-9A-F]+$/;
+// Backward-compatible single-candidate extractor.
+function extractMacCandidate(text) {
+  const cands = extractMacCandidates(text);
+  return cands.length ? cands[0].hex : null;
+}
 
 // Treat input as a MAC lookup if either (a) it's pure hex-with-separators
-// matching a MAC/prefix size, or (b) it has a labelled/wrapped MAC inside
-// it (e.g. "MAC Address: 00:1a:2b:3c:4d:5e", "(00-1A-...)", "ether 001a...").
-// The second branch is gated on the label/wrapper actually being present so
-// genuine vendor queries like "3com" or "Apple" stay in the fuzzy path.
+// matching a MAC/prefix size, or (b) extraction yields any candidate. We
+// gate vendor queries like "cisco" / "Apple" by requiring extraction to
+// surface at least one candidate.
 function isHexish(input) {
   const stripped = input.replace(SEPARATORS_RE, '');
   if (stripped.length >= 6 && stripped.length <= 12 && HEX_RE.test(stripped.toUpperCase())) {
     return true;
   }
-  const hasLabel = LABEL_RE.test(input);
-  LABEL_RE.lastIndex = 0; // reset because /g state is sticky
-  const hasWrapper = WRAPPER_CHARS_RE.test(input);
-  WRAPPER_CHARS_RE.lastIndex = 0;
-  if (hasLabel || hasWrapper) {
-    return extractMacCandidate(input) !== null;
-  }
-  return false;
+  return extractMacCandidates(input).length > 0;
 }
 
 function longestPrefixLookup(hex) {
@@ -658,6 +729,32 @@ function longestPrefixLookup(hex) {
     if (hit) return hit;
   }
   return null;
+}
+
+// Try the raw normalized hex first, then walk extracted candidates. Returns
+// { hit, cleaned, ocr } so the UI can render provenance ("matched after
+// cleanup", "corrected O/0 typo", etc).
+function macLookupDetailed(input) {
+  const raw = normalizeMac(input);
+  if (HEX_RE.test(raw) && raw.length >= 6 && raw.length <= 12) {
+    const hit = longestPrefixLookup(raw);
+    if (hit) return { hit, cleaned: raw, ocr: false };
+  }
+  const candidates = extractMacCandidates(input);
+  let firstCleaned = null;
+  let firstOcr = false;
+  for (const c of candidates) {
+    const hit = longestPrefixLookup(c.hex);
+    if (hit) return { hit, cleaned: c.hex, ocr: c.ocr };
+    if (firstCleaned === null) {
+      firstCleaned = c.hex;
+      firstOcr = c.ocr;
+    }
+  }
+  if (HEX_RE.test(raw) && raw.length >= 6 && raw.length <= 12) {
+    return { hit: null, cleaned: raw, ocr: false };
+  }
+  return { hit: null, cleaned: firstCleaned, ocr: firstOcr };
 }
 
 // Deterministic fuzzy vendor search.
@@ -763,7 +860,7 @@ function renderEmpty(msg) {
   els.results.appendChild(div);
 }
 
-function renderResults(entries, { exact = false } = {}) {
+function renderResults(entries, { exact = false, provenance = null } = {}) {
   els.results.innerHTML = '';
   if (entries.length === 0) {
     renderEmpty(tr('no_matches', 'No matches.'));
@@ -771,14 +868,14 @@ function renderResults(entries, { exact = false } = {}) {
   }
   const frag = document.createDocumentFragment();
   if (exact) {
-    frag.appendChild(buildCard(entries[0], true));
+    frag.appendChild(buildCard(entries[0], true, provenance));
   } else {
     for (const e of entries) frag.appendChild(buildCard(e, false));
   }
   els.results.appendChild(frag);
 }
 
-function buildCard(entry, exact) {
+function buildCard(entry, exact, provenance) {
   const card = document.createElement('article');
   card.className = exact ? `card exact ${entry.registry}` : 'card';
 
@@ -805,6 +902,19 @@ function buildCard(entry, exact) {
     addr.textContent = entry.address;
     card.appendChild(addr);
   }
+
+  // Provenance: show the interpreted hex and any cleanup we applied so the
+  // user can tell *what* was looked up, not just the result.
+  if (exact && provenance && provenance.cleaned) {
+    const interp = document.createElement('div');
+    interp.className = 'meta interp';
+    const cleanedDifferent = provenance.cleaned !== entry.assignment;
+    const bits = [];
+    if (cleanedDifferent) bits.push(`Interpreted ${provenance.cleaned}`);
+    if (provenance.ocr) bits.push(tr('note_ocr', 'corrected O/0 or I/1 typo'));
+    if (bits.length) interp.textContent = bits.join(' · ');
+    if (interp.textContent) card.appendChild(interp);
+  }
   return card;
 }
 
@@ -820,21 +930,14 @@ function handleQuery(value) {
   }
 
   if (isHexish(trimmed)) {
-    // If the raw input had a label/wrapper, normalizeMac alone would leave
-    // non-hex letters (e.g. "MACADDRESS001A2B"); prefer the extracted
-    // candidate so labelled inputs round-trip correctly.
-    let hex = normalizeMac(trimmed);
-    if (!HEX_RE.test(hex)) {
-      const candidate = extractMacCandidate(trimmed);
-      if (candidate) hex = candidate;
-    }
-    const hit = longestPrefixLookup(hex);
+    const { hit, cleaned, ocr } = macLookupDetailed(trimmed);
     if (hit) {
-      renderResults([hit], { exact: true });
+      renderResults([hit], { exact: true, provenance: { cleaned, ocr } });
       flashHit();
       audio.hit();
     } else {
-      renderEmpty(tr('no_prefix', 'No registry entry for prefix {0}.', hex.slice(0, 9)));
+      const shown = (cleaned || normalizeMac(trimmed)).slice(0, 9);
+      renderEmpty(tr('no_prefix', 'No registry entry for prefix {0}.', shown));
       audio.miss();
     }
     return;
