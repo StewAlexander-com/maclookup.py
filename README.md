@@ -1,5 +1,9 @@
 # maclookup.py
 
+[![Offline MAC Address Lookup — IEEE MA-L / MA-M / MA-S](web/icons/og-image.png)](https://stewalexander-com.github.io/maclookup.py/)
+
+**🌐 Try it live: [stewalexander-com.github.io/maclookup.py](https://stewalexander-com.github.io/maclookup.py/)** — installable PWA, works fully offline.
+
 Look up a MAC address's manufacturer in any format without an internet
 connection, across **all three** IEEE assignment registries.
 
