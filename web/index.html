@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#0b1020" />
+  <meta name="theme-color" content="#060912" />
   <meta name="color-scheme" content="dark light" />
 
   <title>Offline MAC Address Lookup — IEEE MA-L / MA-M / MA-S</title>
@@ -53,6 +53,11 @@
       <abbr title="OUI-36 / 36-bit assignments">MA-S</abbr>
       <span data-i18n="tagline_suffix">registries.</span>
     </p>
+    <div class="badges" aria-hidden="true">
+      <span class="b on">scanner online</span>
+      <span class="b alt">ma-l · ma-m · ma-s</span>
+      <span class="b">offline cache armed</span>
+    </div>
   </header>
 
   <main>
@@ -84,6 +89,7 @@
 
   <footer>
     <div class="status" role="status" aria-live="polite">
+      <span id="signal" class="signal" aria-hidden="true"></span>
       <span id="status-text" data-i18n="status_loading">Loading registry…</span>
       <button id="refresh" type="button" disabled
               title="Fetch the latest IEEE registries (online only)"
@@ -91,6 +97,12 @@
               data-i18n-aria-label="refresh_aria"
               aria-label="Refresh registry data">
         <span data-i18n="refresh_button">Refresh data</span>
+      </button>
+      <button id="sound-toggle" type="button" class="sound-toggle"
+              aria-pressed="false"
+              title="Toggle audio cues"
+              aria-label="Toggle audio cues">
+        <span aria-hidden="true">◔ sfx</span>
       </button>
     </div>
     <p class="version">

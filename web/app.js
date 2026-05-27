@@ -49,6 +49,9 @@ const els = {
   statusText: $('#status-text'),
   refresh: $('#refresh'),
   dataVersion: $('#data-version'),
+  // Optional decorative elements — null in test DOM stubs, handled by `?.`.
+  signal: $('#signal'),
+  soundToggle: $('#sound-toggle'),
 };
 
 let state = {
@@ -65,6 +68,97 @@ let state = {
 
 // Outstanding refresh, so we can cancel mid-flight and stay idempotent.
 let activeRefresh = null;
+
+// ----------------------- UI flourishes (cyberpunk theme) -----------------------
+//
+// All decorative. Every entry point is null-guarded so the test DOM (which
+// stubs only the core elements) keeps working unchanged. Reduced-motion users
+// get no animations (CSS handles that). Audio is off by default and requires
+// an explicit user toggle — autoplay restrictions and accessibility both demand it.
+
+const REDUCED_MOTION = (() => {
+  try { return typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches; }
+  catch (_) { return false; }
+})();
+
+function setScanning(on) {
+  try {
+    const b = (typeof document !== 'undefined') && document.body;
+    if (!b || !b.classList) return;
+    b.classList.toggle('scan', !!on && !REDUCED_MOTION);
+  } catch (_) {}
+}
+
+function setSignalClass(cls) {
+  // cls is '' | 'warn' | 'err' — mirror the status text class onto the signal dot.
+  try {
+    if (!els.signal || !els.signal.classList) return;
+    els.signal.classList.remove('warn', 'err');
+    if (cls === 'warn' || cls === 'err') els.signal.classList.add(cls);
+  } catch (_) {}
+}
+
+function flashHit() {
+  if (REDUCED_MOTION) return;
+  const q = els.query;
+  if (!q || !q.classList) return;
+  try {
+    q.classList.remove('hit');
+    // Reflow so the animation restarts on rapid successive matches.
+    // eslint-disable-next-line no-unused-expressions
+    void q.offsetWidth;
+    q.classList.add('hit');
+    setTimeout(() => { try { q.classList.remove('hit'); } catch (_) {} }, 600);
+  } catch (_) {}
+}
+
+// ---- audio cues ----
+// Web Audio generated tones; no external assets. Off by default. The user
+// must click the toggle (which doubles as the required user gesture to
+// unlock AudioContext on Safari/iOS).
+const audio = {
+  ctx: null,
+  enabled: false,
+  unlock() {
+    if (this.ctx) return;
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      this.ctx = new AC();
+    } catch (_) { this.ctx = null; }
+  },
+  beep(freq, durMs, type = 'sine', gain = 0.04) {
+    if (!this.enabled || !this.ctx) return;
+    try {
+      const t0 = this.ctx.currentTime;
+      const osc = this.ctx.createOscillator();
+      const g = this.ctx.createGain();
+      osc.type = type;
+      osc.frequency.setValueAtTime(freq, t0);
+      // Tiny attack/release envelope so it doesn't click.
+      g.gain.setValueAtTime(0, t0);
+      g.gain.linearRampToValueAtTime(gain, t0 + 0.008);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + durMs / 1000);
+      osc.connect(g).connect(this.ctx.destination);
+      osc.start(t0);
+      osc.stop(t0 + durMs / 1000 + 0.02);
+    } catch (_) {}
+  },
+  hit()     { this.beep(880, 90,  'triangle', 0.05); },
+  miss()    { this.beep(220, 120, 'sawtooth', 0.03); },
+  refresh() { this.beep(660, 70, 'sine', 0.04); setTimeout(() => this.beep(990, 70, 'sine', 0.04), 80); },
+};
+
+try {
+  if (els.soundToggle && els.soundToggle.addEventListener) {
+    els.soundToggle.addEventListener('click', () => {
+      audio.unlock();
+      audio.enabled = !audio.enabled;
+      try { els.soundToggle.setAttribute('aria-pressed', String(audio.enabled)); } catch (_) {}
+      if (audio.enabled) audio.refresh(); // confirmation chirp
+    });
+  }
+} catch (_) {}
 
 // ----------------------- Feature detection -----------------------
 
@@ -643,6 +737,7 @@ function setStatus(text, cls = '') {
   els.statusText.className = cls;
   // Remember the last status so we can re-render on language change.
   state.lastStatus = { text, cls };
+  setSignalClass(cls);
 }
 
 // For status calls that should be re-translatable when the user switches
@@ -685,7 +780,7 @@ function renderResults(entries, { exact = false } = {}) {
 
 function buildCard(entry, exact) {
   const card = document.createElement('article');
-  card.className = 'card';
+  card.className = exact ? `card exact ${entry.registry}` : 'card';
 
   const tag = document.createElement('span');
   tag.className = `tag ${entry.registry}`;
@@ -736,14 +831,18 @@ function handleQuery(value) {
     const hit = longestPrefixLookup(hex);
     if (hit) {
       renderResults([hit], { exact: true });
+      flashHit();
+      audio.hit();
     } else {
       renderEmpty(tr('no_prefix', 'No registry entry for prefix {0}.', hex.slice(0, 9)));
+      audio.miss();
     }
     return;
   }
 
   const matches = fuzzyVendorSearch(trimmed, 50);
   renderResults(matches);
+  if (matches.length > 0) flashHit();
 }
 
 // ----------------------- Wire-up -----------------------
@@ -776,11 +875,13 @@ els.refresh.addEventListener('click', async () => {
   activeRefresh = job;
 
   setStatus(tr('checking_updates', 'Checking for updates…'));
+  setScanning(true);
   try {
     const result = await syncWithRemote({ force: true, signal: ctrl && ctrl.signal });
     if (activeRefresh !== job) return; // superseded
     if (result === 'updated') {
       setStatus(tr('refreshed', 'Refreshed — {0} entries.', totalCount()) + statusSuffix(), 'ok');
+      audio.refresh();
     } else if (result === 'fresh') {
       setStatus(tr('already_up_to_date', 'Already up to date — {0} entries.', totalCount()) + statusSuffix(), 'ok');
     } else if (result === 'cancelled') {
@@ -795,6 +896,7 @@ els.refresh.addEventListener('click', async () => {
   } finally {
     if (activeRefresh === job) activeRefresh = null;
     els.refresh.disabled = false;
+    setScanning(false);
   }
 });
 
@@ -835,6 +937,7 @@ window.addEventListener('unhandledrejection', (ev) => {
 });
 
 async function boot() {
+  setScanning(true);
   // Service worker registration is fire-and-forget. We never await it: a slow
   // or broken SW must not delay the first paint or the lookup UI.
   if (HAS_SW) {
@@ -902,15 +1005,18 @@ async function boot() {
 // Boot. Wrap so any synchronous throw doesn't kill the whole script load —
 // the user still sees the page chrome and the refresh button.
 try {
-  boot().catch((e) => {
-    try { console.info('[maclookup] boot failed:', e && e.message || e); } catch (_) {}
-    if (!state.loaded) {
-      setStatus(tr('failed_startup', 'Failed to start up.'), 'err');
-      renderEmpty(tr('failed_load_refresh', 'Failed to load. Try refreshing the page.'));
-      els.refresh.disabled = false;
-    }
-  });
+  boot()
+    .catch((e) => {
+      try { console.info('[maclookup] boot failed:', e && e.message || e); } catch (_) {}
+      if (!state.loaded) {
+        setStatus(tr('failed_startup', 'Failed to start up.'), 'err');
+        renderEmpty(tr('failed_load_refresh', 'Failed to load. Try refreshing the page.'));
+        els.refresh.disabled = false;
+      }
+    })
+    .finally(() => setScanning(false));
 } catch (e) {
   try { console.info('[maclookup] boot threw:', e && e.message || e); } catch (_) {}
   setStatus(tr('failed_startup', 'Failed to start up.'), 'err');
+  setScanning(false);
 }
