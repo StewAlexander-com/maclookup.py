@@ -146,6 +146,106 @@ class TestLookup(unittest.TestCase):
         self.assertIsNone(self.maclookup.lookup("0011", self.registries))
 
 
+class TestMacFormats(unittest.TestCase):
+    """All vendor-emitted MAC formats must resolve to the same lookup result."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.maclookup = _load_maclookup()
+        cls.registries = cls.maclookup.load_all()
+
+    def _xerox(self, input_str):
+        """Lookup an input that should land on Xerox's MA-L (000000)."""
+        return self.maclookup.lookup(input_str, self.registries)
+
+    def test_canonical_formats_all_resolve(self):
+        cases = [
+            "00:00:00:11:22:33",     # colon
+            "00-00-00-11-22-33",     # hyphen / Windows
+            "000000.112233",         # dot (rare but valid)
+            "0000.0011.2233",        # Cisco dotted-triple
+            "000000112233",          # plain hex
+            "00 00 00 11 22 33",     # space-separated
+            "00:00:00",              # MA-L prefix only
+            "00-00-00",              # MA-L prefix, hyphen
+            "0000.00",               # MA-L prefix, dotted
+            "000000",                # MA-L prefix, plain
+        ]
+        for c in cases:
+            with self.subTest(input=c):
+                rec = self._xerox(c)
+                self.assertIsNotNone(rec, f"no match for {c!r}")
+                self.assertEqual(rec.assignment, "000000")
+                self.assertIn("XEROX", rec.organization.upper())
+
+    def test_case_insensitivity(self):
+        rec_upper = self._xerox("00:AA:BB")  # arbitrary; only checking normalize symmetry
+        rec_lower = self._xerox("00:aa:bb")
+        # Even if there's no Xerox match for 00:AA:BB, both calls must agree.
+        self.assertEqual(rec_upper, rec_lower)
+
+    def test_labelled_and_wrapped_inputs_resolve(self):
+        cases = [
+            "MAC Address: 00:00:00:11:22:33",
+            "MAC: 00-00-00-11-22-33",
+            "Hardware Address 0000.0011.2233",
+            "HWaddr 00:00:00:11:22:33",
+            "Physical Address. . . . . : 00-00-00-11-22-33",  # ipconfig style
+            "ether 00:00:00:11:22:33  txqueuelen 1000  (Ethernet)",  # ifconfig style
+            "(00:00:00:11:22:33)",
+            "[00-00-00-11-22-33]",
+            "<00:00:00:11:22:33>",
+            "BIA: 0000.0011.2233",                  # Cisco "show interfaces"
+        ]
+        for c in cases:
+            with self.subTest(input=c):
+                rec = self._xerox(c)
+                self.assertIsNotNone(rec, f"labelled input did not resolve: {c!r}")
+                self.assertEqual(rec.assignment, "000000")
+
+    def test_extract_mac_candidate_handles_known_shapes(self):
+        f = self.maclookup.extract_mac_candidate
+        self.assertEqual(f("00:1A:2B:3C:4D:5E"), "001A2B3C4D5E")
+        self.assertEqual(f("00-1A-2B-3C-4D-5E"), "001A2B3C4D5E")
+        self.assertEqual(f("001a.2b3c.4d5e"), "001A2B3C4D5E")
+        self.assertEqual(f("001A2B3C4D5E"), "001A2B3C4D5E")
+        self.assertEqual(f("MAC: 00:1A:2B:3C:4D:5E"), "001A2B3C4D5E")
+        self.assertEqual(f("(00:1A:2B)"), "001A2B")
+        # Plain "001A2B" is a valid 6-hex MA-L prefix.
+        self.assertEqual(f("001A2B"), "001A2B")
+
+    def test_extract_mac_candidate_rejects_vendor_text(self):
+        f = self.maclookup.extract_mac_candidate
+        # "3com" — the hex-only fragment "3c" is 2 chars, below the 6-char floor.
+        self.assertIsNone(f("3com"))
+        # "Apple" — no hex run at all.
+        self.assertIsNone(f("Apple Inc"))
+        # "cisco" — only "c"s and "c" repeats; not 6 contiguous.
+        self.assertIsNone(f("cisco"))
+        # Empty / whitespace
+        self.assertIsNone(f(""))
+        self.assertIsNone(f("   "))
+
+    def test_extract_picks_longest_run(self):
+        # Real-world "show interfaces" line with a leading interface index and
+        # then the MAC. We want the MAC, not "0".
+        f = self.maclookup.extract_mac_candidate
+        self.assertEqual(
+            f("GigabitEthernet0/1, MAC 00:1A:2B:3C:4D:5E up"),
+            "001A2B3C4D5E",
+        )
+
+    def test_normalize_mac_preserves_legacy_behavior(self):
+        # The original normalize_mac contract: strip separators, uppercase.
+        # We must NOT silently start stripping labels here — callers that
+        # passed already-clean input get the same result they always did.
+        n = self.maclookup.normalize_mac
+        self.assertEqual(n("00:1A:2B:3C:4D:5E"), "001A2B3C4D5E")
+        # Label characters are NOT stripped by normalize_mac itself; they're
+        # only handled by extract_mac_candidate / lookup.
+        self.assertEqual(n("MAC: 00:1A:2B"), "MAC001A2B")
+
+
 class TestWebDataBundle(unittest.TestCase):
     """If the PWA data bundle is present, it must agree with the source CSVs."""
 
