@@ -627,19 +627,43 @@ function looksMacShaped(token) {
   return stripped.length >= 6 && stripped.length <= 12;
 }
 
-// When a separator-bearing token has no hex letters (a-f) at all — so it's
-// pure digits and could be confused with a phone number / part number /
-// IPv4 — require every separator-delimited group to be a uniform MAC group
-// size (all 2 chars or all 4 chars). Rejects '1-800-555-1234' (1/3/3/4)
-// while accepting '01:23:45:67:89:01' (2/2/2/2/2/2) and '0123.4567.8901'.
+// Group sizes that real MAC formats use between separators. A separator-
+// bearing pure-digit token (no a-f) is accepted only if its groups fit
+// these sizes; the 4+-group regime additionally requires uniformity, so
+// 2/2/4/4 phone shapes like '+44-20-7946-0958' are rejected.
+const MAC_GROUP_SIZES = new Set([2, 4, 6]);
+
+// When a separator-bearing token has no hex letters (a-f), it's pure
+// digits and could collide with a phone number / IPv4 / part number.
+// Real MAC formats use 2/4/6-char groups; for tokens with 4+ groups,
+// real MACs are always uniformly sized (6×2 colon/hyphen or 3×4 Cisco).
 function hasMacishGrouping(token) {
   if (/[a-fA-F]/.test(token)) return true;
   const groups = token.split(/[-:.]/);
   if (groups.length < 2) return true;
-  const size = groups[0].length;
-  if (size !== 2 && size !== 4) return false;
-  for (const g of groups) if (g.length !== size) return false;
+  const sizes = groups.map((g) => g.length);
+  for (const s of sizes) if (!MAC_GROUP_SIZES.has(s)) return false;
+  if (groups.length >= 4) {
+    const first = sizes[0];
+    for (const s of sizes) if (s !== first) return false;
+  }
   return true;
+}
+
+// Wrapper / whitespace chars stripped before sizing groups on the raw
+// input. Mirrors the Python WRAPPER_CHARS so the bare-normalize fast
+// path doesn't accidentally let a wrapped phone number through.
+const RAW_STRIP_CHARS_RE = /[()\[\]<>{}"'`,;\s]/g;
+
+// Gate for the bare-normalize fast path. If the raw input looks like a
+// phone number / IPv4 / serial after wrappers are stripped, we should
+// not surface its normalized hex as a 'cleaned' partial-prefix value.
+function normalizedInputIsMacShaped(rawInput) {
+  if (rawInput == null) return false;
+  const stripped = String(rawInput).replace(RAW_STRIP_CHARS_RE, '');
+  if (!stripped) return false;
+  if (!/[-:.]/.test(stripped)) return true;
+  return hasMacishGrouping(stripped);
 }
 
 // Score a single token. Returns {hex, ocr} or null. OCR substitutions are
@@ -751,7 +775,11 @@ function longestPrefixLookup(hex) {
 // cleanup", "corrected O/0 typo", etc).
 function macLookupDetailed(input) {
   const raw = normalizeMac(input);
-  if (HEX_RE.test(raw) && raw.length >= 6 && raw.length <= 12) {
+  const bareOk =
+    HEX_RE.test(raw) &&
+    raw.length >= 6 && raw.length <= 12 &&
+    normalizedInputIsMacShaped(input);
+  if (bareOk) {
     const hit = longestPrefixLookup(raw);
     if (hit) return { hit, cleaned: raw, ocr: false };
   }
@@ -766,7 +794,7 @@ function macLookupDetailed(input) {
       firstOcr = c.ocr;
     }
   }
-  if (HEX_RE.test(raw) && raw.length >= 6 && raw.length <= 12) {
+  if (bareOk) {
     return { hit: null, cleaned: raw, ocr: false };
   }
   return { hit: null, cleaned: firstCleaned, ocr: firstOcr };

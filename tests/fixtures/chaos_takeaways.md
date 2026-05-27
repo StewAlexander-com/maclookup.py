@@ -37,27 +37,51 @@ The full per-case results live alongside this file in
 * multi-MAC inputs (rig pins that the first plausible candidate wins)
 * pathological empties and overlong runs
 
-## Defect found & fixed
+## Defects found & fixed
 
-**Phone numbers were being mistaken for MAC candidates.** A token like
-`1-800-555-1234` has hyphens (a MAC separator) and 11 hex-valid chars
-(all digits are hex-valid), which is inside the 6–12 length window the
-extractor uses. It cleaned to `18005551234` and was offered as a MAC
-candidate even though no human would read it that way.
+### 1. Phone-shaped tokens classified as MAC candidates (PR #13)
 
-The fix (`maclookup.py:_has_macish_grouping`) adds a guard: when a token
-has internal separators but contains **no hex letters (a–f)**, every
-separator-delimited group must be the same size *and* be either 2 or 4
-chars long. That rejects `1-800-555-1234` (1/3/3/4) and `(415) 555-1212`
-shapes while accepting `01:23:45:67:89:01` (2/2/2/2/2/2) and
-`0123.4567.8901` (4/4/4). Tokens that contain at least one hex letter
-are unaffected — there's no ambiguity there.
+A token like `1-800-555-1234` has hyphens (a MAC separator) and 11
+hex-valid chars (all digits are hex-valid), which is inside the 6–12
+length window the extractor uses. It cleaned to `18005551234` and was
+offered as a MAC candidate even though no human would read it that way.
 
-The guard is covered by:
+The fix (`maclookup.py:_has_macish_grouping`) added a guard: when a
+token has internal separators but contains **no hex letters (a–f)**,
+its separator-delimited groups must be sized like a MAC's (2, 4, or 6),
+and tokens with 4+ groups must additionally be uniformly sized.
+
+### 2. Bare-normalize fast path bypassed the guard (this PR)
+
+After PR #13 shipped, the live PWA still showed `1-800-555-1234` as
+*"No registry entry for prefix 180055512"*. Root cause:
+`lookup_detailed` (and the JS `macLookupDetailed`) had a separate fast
+path that fed `normalize_mac(input)` straight into the prefix matcher
+without consulting `extract_mac_candidates`. Phone digits survived
+`normalize_mac` because it only strips `[-:.\s]` — the resulting 11
+all-hex chars passed the 6–12 window check and produced a `cleaned`
+value with `note='partial'`, which the UI rendered as a prefix message.
+
+The fix adds `_normalized_input_is_mac_shaped(raw)` (and JS
+`normalizedInputIsMacShaped(input)`) which strips wrappers/whitespace
+from the raw input and applies the same group-uniformity rule before
+the fast path is allowed to surface a cleaned value. With the gate,
+phone-shaped inputs end up with `cleaned=None` so the UI shows no
+prefix message at all.
+
+The two defects are covered by:
 
 * `tests/test_chaos_rig.py::test_no_phone_numbers_become_macs`
-* The `false-positive` category in the chaos corpus
-  (`tests/chaos_corpus.py`)
+  — now asserts both `extract_mac_candidates(...) == []` AND
+  `lookup_detailed(...).cleaned is None`
+* The `false-positive` category in the chaos corpus now includes the
+  bare phone shapes (`1-800-555-1234`, `555-1234`, `(415) 555-1212`,
+  `+44-20-7946-0958`, `192.168.1.1`, `10.0.0.1`) as `expect=none`,
+  pinning `cleaned=None` so any future regression in the fast path
+  fails the rig.
+* `tests/web/mac_formats.mjs` directly exercises
+  `normalizedInputIsMacShaped`, `hasMacishGrouping`, and a simulated
+  `macLookupDetailed` to pin the same outcome on the JS side.
 
 ## Things that work today and were worth pinning
 

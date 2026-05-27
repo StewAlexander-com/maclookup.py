@@ -35,21 +35,36 @@ class TestChaosCorpus(unittest.TestCase):
                 )
 
     def test_no_phone_numbers_become_macs(self):
-        # Regression guard for the defect surfaced by the original chaos
-        # run: '1-800-555-1234' previously cleaned to '18005551234'. The
-        # group-uniformity guard rejects pure-digit tokens whose groups
-        # aren't all 2 or all 4 chars.
+        # Regression guard for the original chaos defect (PR #13) AND the
+        # follow-up live-PWA defect: 'extract_mac_candidates' must return
+        # [] AND 'lookup_detailed' must return cleaned=None. The latter
+        # is what the UI actually consumes -- the original PR only fixed
+        # the candidate scorer, leaving the bare-normalize fast path in
+        # lookup_detailed to still surface fake "partial prefix" values.
         from chaos_rig import _load_maclookup
         m = _load_maclookup()
+        registries = m.load_all()
         for phone in (
             "1-800-555-1234",
+            "555-1234",
             "(415) 555-1212",
             "+44-20-7946-0958",
+            "192.168.1.1",
+            "10.0.0.1",
         ):
             with self.subTest(phone=phone):
                 self.assertEqual(
                     m.extract_mac_candidates(phone), [],
                     f"{phone!r} should not produce a MAC candidate",
+                )
+                result = m.lookup_detailed(phone, registries)
+                self.assertIsNone(
+                    result.record,
+                    f"{phone!r} should not match a registry: {result.record}",
+                )
+                self.assertIsNone(
+                    result.cleaned,
+                    f"{phone!r} should not surface a cleaned hex: {result.cleaned!r}",
                 )
 
     def test_vendor_words_never_become_macs(self):

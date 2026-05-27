@@ -42,9 +42,15 @@ const block = src.slice(startIdx, endIdx);
 // Evaluate inside a Function so we control the exports.
 const factory = new Function(`
   ${block}
-  return { normalizeMac, extractMacCandidate, extractMacCandidates, isHexish };
+  return {
+    normalizeMac, extractMacCandidate, extractMacCandidates, isHexish,
+    hasMacishGrouping, normalizedInputIsMacShaped,
+  };
 `);
-const { normalizeMac, extractMacCandidate, extractMacCandidates, isHexish } = factory();
+const {
+  normalizeMac, extractMacCandidate, extractMacCandidates, isHexish,
+  hasMacishGrouping, normalizedInputIsMacShaped,
+} = factory();
 
 // ---- normalizeMac symmetry with the Python normalize_mac ----
 assert(normalizeMac('00:1A:2B:3C:4D:5E') === '001A2B3C4D5E', 'colon');
@@ -177,6 +183,94 @@ assert(extractMacCandidate('01:23:45:67:89:01') === '012345678901',
        'all-digit MAC with 2-char groups still resolves');
 assert(extractMacCandidate('0123.4567.8901') === '012345678901',
        'all-digit Cisco-style MAC still resolves');
+
+// ---- Hardening: bare-normalize fast path must respect the same guard ----
+// Regression for the live-PWA defect on PR #13: phone numbers like
+// '1-800-555-1234' normalize to 11 hex-valid digits and used to bypass
+// extractMacCandidates entirely, ending up as a fake "partial prefix"
+// in the UI. normalizedInputIsMacShaped must veto phone shapes whose
+// normalize_mac output is otherwise valid hex (the others fall out at
+// the _all_hex check because their wrappers aren't separator chars).
+const phonesReachingGate = [
+  '1-800-555-1234',     // groups 1/3/3/4 -- size 1 not in {2,4,6}
+  '555-1234',           // groups 3/4 -- size 3 not in {2,4,6}
+];
+for (const phone of phonesReachingGate) {
+  assert(normalizedInputIsMacShaped(phone) === false,
+         `bare-normalize must reject phone ${JSON.stringify(phone)}`);
+}
+// Legit MAC inputs must still pass the gate.
+const macShaped = [
+  '00:00:00:11:22:33',
+  '00-00-00-11-22-33',
+  '0000.0011.2233',
+  '000000.112233',
+  '000000112233',
+  '00-00-00-12-34-56',
+  '01:23:45:67:89:01',
+  '0000.00',
+  ' MAC: 00:1A:2B:3C:4D:5E ',
+  '(00:00:00:11:22:33)',
+];
+for (const m of macShaped) {
+  assert(normalizedInputIsMacShaped(m) === true,
+         `bare-normalize must accept ${JSON.stringify(m)}`);
+}
+
+// Group-uniformity helper directly.
+assert(hasMacishGrouping('1-800-555-1234') === false,
+       'hasMacishGrouping rejects 1-3-3-4 phone');
+assert(hasMacishGrouping('44-20-7946-0958') === false,
+       'hasMacishGrouping rejects 2-2-4-4 UK phone (4+ groups must be uniform)');
+assert(hasMacishGrouping('00-00-00-11-22-33') === true,
+       'hasMacishGrouping accepts canonical 6×2 MAC');
+assert(hasMacishGrouping('0000.0011.2233') === true,
+       'hasMacishGrouping accepts canonical 3×4 MAC');
+assert(hasMacishGrouping('0000.00') === true,
+       'hasMacishGrouping accepts truncated 4/2 prefix');
+
+// ---- Full macLookupDetailed equivalent: with a stub longestPrefixLookup
+// that always misses, the function must return cleaned=null for phone
+// shapes (the original PR #13 defect) and a valid hex cleaned for real
+// MAC-shaped inputs.
+function simulatedLookup(input) {
+  const HEX_RE_LOCAL = /^[0-9A-F]+$/;
+  const raw = normalizeMac(input);
+  const bareOk =
+    HEX_RE_LOCAL.test(raw) &&
+    raw.length >= 6 && raw.length <= 12 &&
+    normalizedInputIsMacShaped(input);
+  const candidates = extractMacCandidates(input);
+  // No registry hit possible in the simulation -- just decide the
+  // cleaned/null outcome the UI would render.
+  if (candidates.length > 0) return { cleaned: candidates[0].hex };
+  if (bareOk) return { cleaned: raw };
+  return { cleaned: null };
+}
+
+// Phone-shape that reaches the bare-normalize gate must not surface a
+// cleaned value (this is the exact live-PWA defect on PR #13).
+assert(simulatedLookup('1-800-555-1234').cleaned === null,
+       'phone 1-800-555-1234 must not produce a cleaned hex');
+assert(simulatedLookup('555-1234').cleaned === null,
+       'phone 555-1234 must not produce a cleaned hex');
+
+// Real MAC inputs must still surface their canonical hex.
+const realCleanCases = [
+  ['00:00:00:11:22:33', '000000112233'],
+  ['00-00-00-12-34-56', '000000123456'],
+  ['0000.0011.2233',    '000000112233'],
+  ['000000.112233',     '000000112233'],
+  ['000000112233',      '000000112233'],
+  ['01:23:45:67:89:01', '012345678901'],
+  ['0123.4567.8901',    '012345678901'],
+  ['MAC: 00:1A:2B:3C:4D:5E', '001A2B3C4D5E'],
+];
+for (const [input, expected] of realCleanCases) {
+  const out = simulatedLookup(input);
+  assert(out.cleaned === expected,
+         `simulatedLookup(${JSON.stringify(input)}) cleaned=${out.cleaned}, want ${expected}`);
+}
 
 // ---- isHexish gates correctly with hardening ----
 assert(isHexish('OO:1A:7D:AA:BB:CC') === true,
