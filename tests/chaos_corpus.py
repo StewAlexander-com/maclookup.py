@@ -217,6 +217,30 @@ CASES: list[Case] = [
     Case("call 1-800-555-1234", "none",
          "phone number — no MAC-shaped token",
          category="false-positive"),
+    # Bare phone-number inputs are what users actually paste into the PWA
+    # search box. Live-PWA regression on PR #13: normalize_mac stripped
+    # the hyphens and produced 11 hex-valid digits, which bypassed the
+    # candidate scorer and surfaced as a fake "no entry for prefix
+    # 180055512" message. The bare-normalize path now respects the same
+    # group-uniformity guard as candidate scoring.
+    Case("1-800-555-1234", "none",
+         "bare US phone (1/3/3/4) — must not produce cleaned hex",
+         category="false-positive"),
+    Case("555-1234", "none",
+         "bare 7-digit phone (3/4) — group sizes not in {2,4,6}",
+         category="false-positive"),
+    Case("(415) 555-1212", "none",
+         "wrapped US phone — wrappers + non-MAC groups",
+         category="false-positive"),
+    Case("+44-20-7946-0958", "none",
+         "international UK phone (2/2/4/4) — 4+ groups must be uniform",
+         category="false-positive"),
+    Case("192.168.1.1", "none",
+         "IPv4 address (3/3/1/1) — not a MAC",
+         category="false-positive"),
+    Case("10.0.0.1", "none",
+         "IPv4 address with one-digit groups",
+         category="false-positive"),
     # A serial number with hyphens but pure digits past the prefix shouldn't
     # be coerced into a MAC. 8 chars of digits is below MA-M prefix length
     # of 7 — wait, 8 >= 7. The crucial property: we don't *invent* a MAC

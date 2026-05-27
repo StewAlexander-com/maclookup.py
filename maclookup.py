@@ -114,25 +114,71 @@ def _has_hex_letter(s: str) -> bool:
 # separators but no hex letters (pure digits — so a phone number or serial
 # could be confused for a MAC) must use one of these uniform group sizes;
 # this rejects shapes like 1-800-555-1234 (1/3/3/4) while accepting
-# 01:23:45:67:89:01 (2/2/2/2/2/2) and 0123.4567.8901 (4/4/4).
-_MAC_GROUP_SIZES = {2, 4}
+# 01:23:45:67:89:01 (2/2/2/2/2/2), 0123.4567.8901 (4/4/4), and the rarer
+# 000000.112233 (6/6, single-dot half-and-half).
+_MAC_GROUP_SIZES = {2, 4, 6}
 
 
 def _has_macish_grouping(token: str) -> bool:
     """When a separator-bearing token has no hex letters (pure digits),
-    require every separator-delimited group to be a uniform MAC group size.
+    require every separator-delimited group to be sized like a MAC group.
 
-    Tokens with at least one hex letter (a-f) are accepted as MAC-shaped
-    purely on length, since digits-only strings are the ones that collide
-    with phone numbers / part numbers / dotted IPv4-ish things.
+    Real MAC formats use group sizes in {2, 4, 6} -- ``2/2/2/2/2/2``
+    (colon/hyphen), ``4/4/4`` (Cisco dotted), ``6/6`` (single-dot
+    half-and-half), and the truncated-prefix shapes ``0000.00`` (4/2),
+    ``0000.0011`` (4/4), ``00:00:00`` (3×2). Phone numbers and IPv4
+    addresses tend to mix 1 / 3 / 4-char groups.
+
+    Rules (pure-digit only -- a-f anywhere means the token is unambiguous
+    enough that length alone is fine):
+      * 2 or 3 groups: each group's length must be in {2, 4, 6}. This
+        permits ``0000.00`` (4/2) and ``000000.112233`` (6/6) while
+        rejecting ``(415) 555-1212`` (3/4 after wrapper strip).
+      * 4 or more groups: groups must additionally be uniformly sized.
+        Real MACs in this regime are always 6×2 (colon/hyphen) or 3×4
+        (Cisco) -- never a 2/2/4/4 mix like ``+44-20-7946-0958``.
     """
     if _has_hex_letter(token):
         return True
     groups = _INNER_SEP_RE.split(token)
     if len(groups) < 2:
         return True
-    sizes = {len(g) for g in groups}
-    return len(sizes) == 1 and sizes.issubset(_MAC_GROUP_SIZES)
+    sizes = [len(g) for g in groups]
+    if any(s not in _MAC_GROUP_SIZES for s in sizes):
+        return False
+    if len(groups) >= 4 and len(set(sizes)) != 1:
+        return False
+    return True
+
+
+def _normalized_input_is_mac_shaped(raw_input: str) -> bool:
+    """Decide whether ``raw_input`` is safe to treat as bare MAC hex once
+    separators are stripped.
+
+    The bare-normalize fast path in :func:`lookup_detailed` exists for
+    already-clean inputs like ``00:1A:2B:3C:4D:5E``. If we let phone-shaped
+    strings such as ``1-800-555-1234`` through, we end up reporting a
+    ``cleaned`` value (``18005551234``) and a partial-prefix message, which
+    is exactly the false positive the chaos rig caught. Require the same
+    group-uniformity guard as :func:`_candidate_from_token` so the two
+    paths agree.
+    """
+    if raw_input is None:
+        return False
+    text = raw_input.strip()
+    if not text:
+        return False
+    # Strip the wrappers / whitespace that aren't part of the MAC itself
+    # before sizing groups. Mirrors what extract_mac_candidates does.
+    for ch in _WRAPPER_CHARS + " ":
+        text = text.replace(ch, "")
+    if not text:
+        return False
+    # No inner separators left -- bare hex. Length sanity is checked by
+    # the caller against the 6-12 hex window.
+    if not _INNER_SEP_RE.search(text):
+        return True
+    return _has_macish_grouping(text)
 
 
 def _candidate_from_token(token: str) -> Optional[tuple]:
@@ -322,11 +368,17 @@ def lookup_detailed(
         registries = load_all()
 
     note = ""
-    normalized = normalize_mac(mac_address or "")
+    raw = mac_address or ""
+    normalized = normalize_mac(raw)
     cleaned: Optional[str] = None
     record: Optional[VendorRecord] = None
 
-    if _all_hex(normalized) and 6 <= len(normalized) <= 12:
+    bare_path_ok = (
+        _all_hex(normalized)
+        and 6 <= len(normalized) <= 12
+        and _normalized_input_is_mac_shaped(raw)
+    )
+    if bare_path_ok:
         cleaned = normalized
         record = _match_prefix(normalized, registries)
         if record is None:
