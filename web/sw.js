@@ -18,8 +18,8 @@
  *   - Bump *_CACHE names when the on-disk format changes so older clients
  *     evict stale entries on activate.
  */
-const APP_SHELL_CACHE = 'maclookup-shell-v4';
-const DATA_CACHE = 'maclookup-data-v3';
+const APP_SHELL_CACHE = 'maclookup-shell-v5';
+const DATA_CACHE = 'maclookup-data-v4';
 
 // Hard ceiling on network-first data requests inside the SW. The browser
 // cache fallback path needs to fire well before the PWA's own fetch timeout.
