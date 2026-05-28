@@ -201,6 +201,12 @@ abbr {
 .card.exact.MA-L::before { background: var(--good); }
 .card.exact.MA-M::before { background: var(--warn); }
 .card.exact.MA-S::before { background: var(--accent); }
+.card.classified .tag.classified {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--panel-2));
+  white-space: normal;
+}
+.card.classified::before { background: var(--warn); }
 .card .org { font-weight: 600; }
 .card .meta {
   grid-column: 2;

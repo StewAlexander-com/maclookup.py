@@ -273,6 +273,25 @@ CASES: list[Case] = [
     Case("[00:00:00:11:22:33, 00:05:9A:DE:AD:BE]",
          "match", "JSON list of two MACs", XEROX_MAL, category="multi-mac"),
 
+    # ----- ARP-style single-nibble octets --------------------------------
+    # An Apple MacBook's ARP entry was emitted as ``fe:35:b6:60:f:ee`` (one
+    # octet shrunk from ``0f`` to ``f``). The candidate extractor pads
+    # short octets so the MAC reaches the lookup; the FE first byte has
+    # the locally administered bit set so there is no IEEE OUI hit.
+    Case("fe:35:b6:60:f:ee", "partial",
+         "Apple ARP form — single-nibble octet padded to 0F",
+         cleaned="FE35B6600FEE", category="single-nibble"),
+    Case("0:1a:2b:3c:4d:5e", "match",
+         "leading short octet padded to 00; resolves Ayecom MA-L",
+         AYECOM_MAL, category="single-nibble"),
+    Case("0-1a-2b-3c-4d-5e", "match",
+         "hyphen separators with leading short octet padded",
+         AYECOM_MAL, category="single-nibble"),
+    # Pure-digit single-nibble groups must NOT be padded — too ambiguous.
+    Case("1:2:3:4:5:6", "none",
+         "pure-digit single-nibble shape — no hex letters, must not pad",
+         category="single-nibble"),
+
     # ----- Pathological / empty ------------------------------------------
     Case("", "none", "empty string", category="edge"),
     Case("   \t\n  ", "none", "whitespace only", category="edge"),

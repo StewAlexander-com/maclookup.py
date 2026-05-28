@@ -663,7 +663,31 @@ function normalizedInputIsMacShaped(rawInput) {
   const stripped = String(rawInput).replace(RAW_STRIP_CHARS_RE, '');
   if (!stripped) return false;
   if (!/[-:.]/.test(stripped)) return true;
+  // Single-nibble-octet shapes (e.g. fe:35:b6:60:f:ee) are handled by
+  // the candidate extractor, which pads short octets. The bare path
+  // would just strip the colons and shift the prefix, so reject any
+  // separator-bearing input with a 1-char group.
+  const groups = stripped.split(/[-:.]/);
+  if (groups.length >= 2 && groups.some((g) => g.length === 1)) return false;
   return hasMacishGrouping(stripped);
+}
+
+// If `token` is exactly 6 colon-or-hyphen-separated hex groups of 1-2
+// chars each, pad each group to two hex chars and return the joined
+// 12-hex string. Otherwise null. Mirrors maclookup._maybe_pad_single_nibble_octets.
+function maybePadSingleNibbleOctets(token) {
+  let groups;
+  if (token.indexOf(':') >= 0) groups = token.split(':');
+  else if (token.indexOf('-') >= 0) groups = token.split('-');
+  else return null;
+  if (groups.length !== 6) return null;
+  let hasLetter = false;
+  for (const g of groups) {
+    if (g.length < 1 || g.length > 2 || !HEX_ONLY_TEST.test(g)) return null;
+    if (/[a-fA-F]/.test(g)) hasLetter = true;
+  }
+  if (!hasLetter) return null;
+  return groups.map((g) => (g.length === 1 ? '0' + g : g)).join('').toUpperCase();
 }
 
 // Score a single token. Returns {hex, ocr} or null. OCR substitutions are
@@ -673,6 +697,10 @@ function candidateFromToken(token) {
   if (!token) return null;
   if (HEX_ONLY_TEST.test(token) && token.length >= 6 && token.length <= 12) {
     return { hex: token.toUpperCase(), ocr: false };
+  }
+  const padded = maybePadSingleNibbleOctets(token);
+  if (padded != null) {
+    return { hex: padded, ocr: false };
   }
   if (looksMacShaped(token) && hasMacishGrouping(token)) {
     const stripped = token.replace(INNER_SEP_RE, '');
@@ -762,6 +790,25 @@ function isHexish(input) {
   return extractMacCandidates(input).length > 0;
 }
 
+// Classify a 12-hex MAC by IEEE first-byte bits. Returns one of
+// 'broadcast', 'all-zero', 'multicast-laa', 'multicast', 'laa', or ''
+// when the input isn't a full 12-hex MAC or has no special property.
+// Mirrors maclookup.classify_mac.
+function classifyMac(hex) {
+  if (!hex || hex.length !== 12) return '';
+  const upper = hex.toUpperCase();
+  if (upper === 'FFFFFFFFFFFF') return 'broadcast';
+  if (upper === '000000000000') return 'all-zero';
+  const firstByte = parseInt(upper.slice(0, 2), 16);
+  if (!Number.isFinite(firstByte)) return '';
+  const multicast = (firstByte & 0x01) !== 0;
+  const laa = (firstByte & 0x02) !== 0;
+  if (multicast && laa) return 'multicast-laa';
+  if (multicast) return 'multicast';
+  if (laa) return 'laa';
+  return '';
+}
+
 function longestPrefixLookup(hex) {
   for (const label of REGISTRY_ORDER) {
     const len = PREFIX_LEN[label];
@@ -785,23 +832,23 @@ function macLookupDetailed(input) {
     normalizedInputIsMacShaped(input);
   if (bareOk) {
     const hit = longestPrefixLookup(raw);
-    if (hit) return { hit, cleaned: raw, ocr: false };
+    if (hit) return { hit, cleaned: raw, ocr: false, classification: classifyMac(raw) };
   }
   const candidates = extractMacCandidates(input);
   let firstCleaned = null;
   let firstOcr = false;
   for (const c of candidates) {
     const hit = longestPrefixLookup(c.hex);
-    if (hit) return { hit, cleaned: c.hex, ocr: c.ocr };
+    if (hit) return { hit, cleaned: c.hex, ocr: c.ocr, classification: classifyMac(c.hex) };
     if (firstCleaned === null) {
       firstCleaned = c.hex;
       firstOcr = c.ocr;
     }
   }
   if (bareOk) {
-    return { hit: null, cleaned: raw, ocr: false };
+    return { hit: null, cleaned: raw, ocr: false, classification: classifyMac(raw) };
   }
-  return { hit: null, cleaned: firstCleaned, ocr: firstOcr };
+  return { hit: null, cleaned: firstCleaned, ocr: firstOcr, classification: classifyMac(firstCleaned) };
 }
 
 // Deterministic fuzzy vendor search.
@@ -907,6 +954,71 @@ function renderEmpty(msg) {
   els.results.appendChild(div);
 }
 
+// Title + body text for a classified MAC that didn't match any IEEE
+// registry. Each branch returns translation-friendly strings; the UI
+// renders them as a single info card.
+function classifiedMacText(cleaned, classification) {
+  if (classification === 'broadcast') {
+    return {
+      title: tr('class_broadcast_title', 'Broadcast address'),
+      body: tr('class_broadcast_body',
+        'FF:FF:FF:FF:FF:FF — sent to every device on the LAN. No vendor.'),
+    };
+  }
+  if (classification === 'all-zero') {
+    return {
+      title: tr('class_all_zero_title', 'All-zero MAC'),
+      body: tr('class_all_zero_body',
+        '00:00:00:00:00:00 — typically a placeholder or uninitialized address.'),
+    };
+  }
+  if (classification === 'laa' || classification === 'multicast-laa') {
+    const extra = classification === 'multicast-laa'
+      ? ' ' + tr('class_also_multicast',
+        'Also has the multicast bit set.')
+      : '';
+    return {
+      title: tr('class_laa_title', 'Locally administered MAC'),
+      body: tr('class_laa_body',
+        'Interpreted as {0}. The locally administered bit is set, so this address was not assigned by IEEE — it is likely a randomized / private MAC (Apple Private Wi-Fi Address, a VM, a container, or admin-configured). Vendor lookup cannot map it back to the original manufacturer.',
+        cleaned) + extra,
+    };
+  }
+  if (classification === 'multicast') {
+    return {
+      title: tr('class_multicast_title', 'Multicast / group address'),
+      body: tr('class_multicast_body',
+        'Interpreted as {0}. The I/G bit is set so this is a multicast/group destination, not an individual device. No IEEE OUI maps the destination back to a vendor.',
+        cleaned),
+    };
+  }
+  return null;
+}
+
+function renderClassifiedMac(cleaned, classification) {
+  const text = classifiedMacText(cleaned, classification);
+  if (!text) {
+    renderEmpty(tr('no_prefix', 'No registry entry for prefix {0}.', cleaned.slice(0, 9)));
+    return;
+  }
+  els.results.innerHTML = '';
+  const card = document.createElement('article');
+  card.className = `card classified ${classification}`;
+  const tag = document.createElement('span');
+  tag.className = 'tag classified';
+  tag.textContent = text.title;
+  card.appendChild(tag);
+  const body = document.createElement('div');
+  body.className = 'meta';
+  body.textContent = text.body;
+  card.appendChild(body);
+  const cleanedDiv = document.createElement('div');
+  cleanedDiv.className = 'meta interp';
+  cleanedDiv.textContent = `Interpreted ${cleaned}`;
+  card.appendChild(cleanedDiv);
+  els.results.appendChild(card);
+}
+
 function renderResults(entries, { exact = false, provenance = null } = {}) {
   els.results.innerHTML = '';
   if (entries.length === 0) {
@@ -959,6 +1071,11 @@ function buildCard(entry, exact, provenance) {
     const bits = [];
     if (cleanedDifferent) bits.push(`Interpreted ${provenance.cleaned}`);
     if (provenance.ocr) bits.push(tr('note_ocr', 'corrected O/0 or I/1 typo'));
+    if (provenance.classification === 'laa' || provenance.classification === 'multicast-laa') {
+      bits.push(tr('note_laa', 'locally administered — may be randomized/private'));
+    } else if (provenance.classification === 'multicast') {
+      bits.push(tr('note_multicast', 'multicast/group address'));
+    }
     if (bits.length) interp.textContent = bits.join(' · ');
     if (interp.textContent) card.appendChild(interp);
   }
@@ -977,15 +1094,21 @@ function handleQuery(value) {
   }
 
   if (isHexish(trimmed)) {
-    const { hit, cleaned, ocr } = macLookupDetailed(trimmed);
+    const { hit, cleaned, ocr, classification } = macLookupDetailed(trimmed);
     if (hit) {
-      renderResults([hit], { exact: true, provenance: { cleaned, ocr } });
+      renderResults([hit], { exact: true, provenance: { cleaned, ocr, classification } });
       flashHit();
       audio.hit();
     } else if (cleaned) {
-      // We have a clean hex string that just didn't match any registry.
-      renderEmpty(tr('no_prefix', 'No registry entry for prefix {0}.',
-                     cleaned.slice(0, 9)));
+      // No registry hit, but if the MAC has a well-known class (broadcast,
+      // locally administered / randomized, multicast), explain that instead
+      // of just saying "no entry for prefix ...".
+      if (classification) {
+        renderClassifiedMac(cleaned, classification);
+      } else {
+        renderEmpty(tr('no_prefix', 'No registry entry for prefix {0}.',
+                       cleaned.slice(0, 9)));
+      }
       audio.miss();
     } else {
       // isHexish was true but the lookup couldn't surface a cleaned hex --
