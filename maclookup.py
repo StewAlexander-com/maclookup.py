@@ -43,11 +43,60 @@ class LookupResult(NamedTuple):
     ``cleaned`` is the hex string (no separators, uppercase) that was used as
     the lookup key. ``note`` is one of ``""``, ``"ocr"``, ``"partial"`` and
     explains how the result was reached so the UI can show e.g. "matched by
-    24-bit prefix after cleanup".
+    24-bit prefix after cleanup". ``classification`` is the result of
+    :func:`classify_mac` on ``cleaned`` (empty string when ``cleaned`` isn't
+    a full 12-hex MAC).
     """
     record: Optional[VendorRecord]
     cleaned: Optional[str]
     note: str = ""
+    classification: str = ""
+
+
+# Classification of a full 12-hex MAC. The values are stable strings so the
+# UI / CLI can switch on them. ``""`` means "no special property" (a
+# globally-administered unicast that didn't get a registry hit is just
+# unassigned; nothing to say about it).
+CLASS_BROADCAST = "broadcast"
+CLASS_ALL_ZERO = "all-zero"
+CLASS_MULTICAST_LAA = "multicast-laa"
+CLASS_MULTICAST = "multicast"
+CLASS_LAA = "laa"
+
+
+def classify_mac(hex_only: Optional[str]) -> str:
+    """Return a stable classification string for a 12-hex MAC, or ``""``.
+
+    Tested in priority order: broadcast > all-zero > multicast+LAA >
+    multicast > LAA. Anything else (globally-administered unicast, or a
+    shorter prefix where the first-byte bits aren't a full address) returns
+    ``""`` so the caller can fall back to plain "no registry entry".
+
+    The IEEE first-byte bits are:
+      * bit 0 (mask ``0x01``) — I/G: 1 = multicast/group, 0 = unicast.
+      * bit 1 (mask ``0x02``) — U/L: 1 = locally administered (LAA),
+        0 = globally unique (OUI-assigned).
+    """
+    if not hex_only or len(hex_only) != 12:
+        return ""
+    upper = hex_only.upper()
+    if upper == "FFFFFFFFFFFF":
+        return CLASS_BROADCAST
+    if upper == "000000000000":
+        return CLASS_ALL_ZERO
+    try:
+        first_byte = int(upper[:2], 16)
+    except ValueError:
+        return ""
+    multicast = bool(first_byte & 0x01)
+    laa = bool(first_byte & 0x02)
+    if multicast and laa:
+        return CLASS_MULTICAST_LAA
+    if multicast:
+        return CLASS_MULTICAST
+    if laa:
+        return CLASS_LAA
+    return ""
 
 
 _SEPARATORS_RE = re.compile(r"[-:.\s]")
@@ -178,7 +227,48 @@ def _normalized_input_is_mac_shaped(raw_input: str) -> bool:
     # the caller against the 6-12 hex window.
     if not _INNER_SEP_RE.search(text):
         return True
+    # Single-nibble-octet shapes (e.g. fe:35:b6:60:f:ee) are handled by
+    # the candidate extractor, which pads short octets to two hex chars.
+    # Returning False here forces the lookup off the bare-normalize path,
+    # which would merge octets and shift the prefix when a short octet
+    # isn't at the very end of the address.
+    groups = _INNER_SEP_RE.split(text)
+    if any(len(g) == 1 for g in groups) and len(groups) >= 2:
+        return False
     return _has_macish_grouping(text)
+
+
+def _maybe_pad_single_nibble_octets(token: str) -> Optional[str]:
+    """If ``token`` is 6 colon/hyphen-separated hex groups of 1-2 chars each,
+    pad each group to two hex chars and return the joined 12-hex string.
+
+    This is the ``fe:35:b6:60:f:ee`` ARP-table shape: common output where
+    a leading zero is dropped from one or more octets. Strict gates:
+
+      * Exactly 6 groups (full-MAC shape only — no padding for prefixes).
+      * Each group is 1 or 2 chars of pure hex.
+      * At least one group must contain a hex letter (a-f). Pure-digit
+        single-nibble shapes are too easily confused with IPv6-zone-ish
+        ``1:2:3:4:5:6`` runs or arbitrary colon-separated counters; we
+        keep them out of the MAC path.
+    """
+    if ":" in token:
+        groups = token.split(":")
+    elif "-" in token:
+        groups = token.split("-")
+    else:
+        return None
+    if len(groups) != 6:
+        return None
+    has_letter = False
+    for g in groups:
+        if not (1 <= len(g) <= 2) or not _all_hex(g):
+            return None
+        if _has_hex_letter(g):
+            has_letter = True
+    if not has_letter:
+        return None
+    return "".join(g.zfill(2) for g in groups).upper()
 
 
 def _candidate_from_token(token: str) -> Optional[tuple]:
@@ -193,6 +283,10 @@ def _candidate_from_token(token: str) -> Optional[tuple]:
     # Pure-hex blob in the right size range — no further work needed.
     if _all_hex(token) and 6 <= len(token) <= 12:
         return token.upper(), False
+    # ARP-table single-nibble-octet shape (e.g. fe:35:b6:60:f:ee).
+    padded = _maybe_pad_single_nibble_octets(token)
+    if padded is not None:
+        return padded, False
     if _looks_mac_shaped(token) and _has_macish_grouping(token):
         # Try as-is first (case where O/I/l aren't present).
         stripped = _INNER_SEP_RE.sub("", token)
@@ -384,7 +478,10 @@ def lookup_detailed(
         if record is None:
             note = "partial"
         if record is not None:
-            return LookupResult(record=record, cleaned=cleaned, note="")
+            return LookupResult(
+                record=record, cleaned=cleaned, note="",
+                classification=classify_mac(cleaned),
+            )
 
     # Fall back to free-form extraction. Try every candidate; first to hit
     # wins. We sort non-OCR candidates ahead of OCR-fixed so a clean MAC is
@@ -396,12 +493,18 @@ def lookup_detailed(
                 record=candidate_record,
                 cleaned=hex_only,
                 note="ocr" if used_ocr else "",
+                classification=classify_mac(hex_only),
             )
         if cleaned is None:
             cleaned = hex_only
             note = "partial"
 
-    return LookupResult(record=record, cleaned=cleaned, note=note if cleaned else "")
+    return LookupResult(
+        record=record,
+        cleaned=cleaned,
+        note=note if cleaned else "",
+        classification=classify_mac(cleaned) if cleaned else "",
+    )
 
 
 def search_oui(csv_file, mac_address):
@@ -444,6 +547,19 @@ def format_output(title, content, width=44):
             lines.append(f"| {chunk.ljust(width - 4)} |")
     lines.append(border)
     return "\n".join(lines)
+
+
+_CLASS_BLURBS = {
+    CLASS_BROADCAST: "broadcast (FF:FF:FF:FF:FF:FF)",
+    CLASS_ALL_ZERO: "all-zero",
+    CLASS_LAA: "locally administered (private/randomized)",
+    CLASS_MULTICAST: "multicast/group",
+    CLASS_MULTICAST_LAA: "locally administered multicast",
+}
+
+
+def _class_blurb(classification: str) -> str:
+    return _CLASS_BLURBS.get(classification, classification)
 
 
 def _describe(record: VendorRecord) -> str:
@@ -492,12 +608,42 @@ def main():
                 body += f"\nInterpreted: {result.cleaned}"
             if result.note == "ocr":
                 body += "\nNote: corrected O/0 or I/1 typo"
+            if result.classification:
+                body += f"\nClass: {_class_blurb(result.classification)}"
             print(format_output("Found", body))
         else:
-            msg = f"No entry for {result.cleaned[:9]}"
-            if result.note == "partial":
-                msg += "\n(too few hex chars or no matching prefix)"
-            print(format_output("Not Found", msg))
+            title = "Not Found"
+            if result.classification == CLASS_BROADCAST:
+                msg = "Broadcast address FF:FF:FF:FF:FF:FF\n" \
+                      "(no vendor — sent to every device on the LAN)"
+                title = "Broadcast"
+            elif result.classification == CLASS_ALL_ZERO:
+                msg = f"All-zero MAC {result.cleaned}\n" \
+                      "(often a placeholder or uninitialized address)"
+                title = "All-Zero"
+            elif result.classification in (CLASS_LAA, CLASS_MULTICAST_LAA):
+                msg = (
+                    f"Interpreted: {result.cleaned}\n"
+                    "Locally administered address (U/L bit set).\n"
+                    "Not assigned by IEEE — likely randomized or\n"
+                    "private (Apple Private Wi-Fi Address, VM,\n"
+                    "container, or admin-configured)."
+                )
+                if result.classification == CLASS_MULTICAST_LAA:
+                    msg += "\nAlso multicast (I/G bit set)."
+                title = "Private / Local MAC"
+            elif result.classification == CLASS_MULTICAST:
+                msg = (
+                    f"Interpreted: {result.cleaned}\n"
+                    "Multicast/group address (I/G bit set).\n"
+                    "No IEEE OUI assignment for the destination."
+                )
+                title = "Multicast"
+            else:
+                msg = f"No entry for {result.cleaned[:9]}"
+                if result.note == "partial":
+                    msg += "\n(too few hex chars or no matching prefix)"
+            print(format_output(title, msg))
 
 
 if __name__ == "__main__":

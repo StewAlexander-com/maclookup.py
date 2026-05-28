@@ -347,6 +347,123 @@ class TestLookupHardening(unittest.TestCase):
         self.assertEqual(r.note, "ocr")
 
 
+class TestSingleNibbleAndClassification(unittest.TestCase):
+    """ARP-table single-nibble inputs (fe:35:b6:60:f:ee) and MAC classification.
+
+    Regression for the live-PWA report: an Apple MacBook's ARP entry is
+    emitted as ``fe:35:b6:60:f:ee`` (one octet shrunk from ``0f`` to ``f``)
+    and the PWA reported nothing useful. We now pad short octets and
+    classify locally administered / multicast / broadcast addresses
+    explicitly.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.maclookup = _load_maclookup()
+        cls.registries = cls.maclookup.load_all()
+
+    def test_apple_arp_form_pads_short_octet(self):
+        # The exact input from the user's ARP table.
+        r = self.maclookup.lookup_detailed("fe:35:b6:60:f:ee", self.registries)
+        self.assertEqual(r.cleaned, "FE35B6600FEE")
+        # FE is locally administered (bit 1 set) — not assigned by IEEE.
+        self.assertIsNone(r.record)
+        self.assertEqual(r.classification, self.maclookup.CLASS_LAA)
+
+    def test_leading_short_octet_padded(self):
+        r = self.maclookup.lookup_detailed("0:1a:2b:3c:4d:5e", self.registries)
+        self.assertEqual(r.cleaned, "001A2B3C4D5E")
+        # 001A2B is Ayecom Technology in the bundled MA-L.
+        self.assertIsNotNone(r.record)
+        self.assertEqual(r.record.assignment, "001A2B")
+
+    def test_hyphen_separated_short_octets_padded(self):
+        r = self.maclookup.lookup_detailed("0-1a-2b-3c-4d-5e", self.registries)
+        self.assertEqual(r.cleaned, "001A2B3C4D5E")
+        self.assertIsNotNone(r.record)
+
+    def test_pure_digit_single_nibble_rejected(self):
+        # '1:2:3:4:5:6' has no hex letters and single-nibble groups — too
+        # ambiguous (could be anything). Must NOT be padded into a MAC.
+        cands = self.maclookup.extract_mac_candidates("1:2:3:4:5:6")
+        self.assertEqual(cands, [])
+
+    def test_classify_broadcast(self):
+        c = self.maclookup.classify_mac
+        self.assertEqual(c("FFFFFFFFFFFF"), self.maclookup.CLASS_BROADCAST)
+        self.assertEqual(c("ffffffffffff"), self.maclookup.CLASS_BROADCAST)
+
+    def test_classify_all_zero(self):
+        self.assertEqual(
+            self.maclookup.classify_mac("000000000000"),
+            self.maclookup.CLASS_ALL_ZERO,
+        )
+
+    def test_classify_laa(self):
+        # FE has the locally administered bit (0x02) set, I/G bit clear.
+        self.assertEqual(
+            self.maclookup.classify_mac("FE35B6600FEE"),
+            self.maclookup.CLASS_LAA,
+        )
+        # 02 has only the U/L bit set.
+        self.assertEqual(
+            self.maclookup.classify_mac("02C08C000001"),
+            self.maclookup.CLASS_LAA,
+        )
+
+    def test_classify_multicast(self):
+        # 01:00:5E is IPv4 multicast — first byte has the I/G bit set only.
+        self.assertEqual(
+            self.maclookup.classify_mac("01005E000001"),
+            self.maclookup.CLASS_MULTICAST,
+        )
+
+    def test_classify_multicast_laa(self):
+        # 33:33:... is IPv6 multicast — both I/G and U/L bits set.
+        self.assertEqual(
+            self.maclookup.classify_mac("333300000001"),
+            self.maclookup.CLASS_MULTICAST_LAA,
+        )
+
+    def test_classify_global_unicast_returns_empty(self):
+        # 00:1A:2B... is a globally administered unicast (Xerox-ish prefix
+        # block). No special class.
+        self.assertEqual(self.maclookup.classify_mac("001A2B3C4D5E"), "")
+
+    def test_classify_short_input_returns_empty(self):
+        self.assertEqual(self.maclookup.classify_mac("FE35B6"), "")
+        self.assertEqual(self.maclookup.classify_mac(""), "")
+        self.assertEqual(self.maclookup.classify_mac(None), "")
+
+    def test_lookup_result_carries_classification_for_broadcast(self):
+        r = self.maclookup.lookup_detailed("FF:FF:FF:FF:FF:FF", self.registries)
+        self.assertIsNone(r.record)
+        self.assertEqual(r.cleaned, "FFFFFFFFFFFF")
+        self.assertEqual(r.classification, self.maclookup.CLASS_BROADCAST)
+
+    def test_lookup_result_carries_classification_for_multicast(self):
+        r = self.maclookup.lookup_detailed("01:00:5E:00:00:01", self.registries)
+        self.assertEqual(r.classification, self.maclookup.CLASS_MULTICAST)
+
+    def test_classification_attached_to_hit(self):
+        # A registry-matching LAA MAC (3COM owns the 02:C0:8C MA-L block).
+        r = self.maclookup.lookup_detailed("02:C0:8C:00:00:01", self.registries)
+        self.assertIsNotNone(r.record)
+        self.assertEqual(r.classification, self.maclookup.CLASS_LAA)
+
+    def test_single_nibble_does_not_swallow_phone(self):
+        # Phone shapes with single-nibble groups (e.g. trailing area code
+        # noise) must not be interpreted as MACs — they have fewer than 6
+        # groups or contain non-hex digits like 7/8/9 only without letters,
+        # but more importantly we require at least one hex letter to engage
+        # the padding path.
+        for phone in ["1-800-555-1234", "(415) 555-1212", "5-5-5-1-2-3"]:
+            with self.subTest(phone=phone):
+                r = self.maclookup.lookup_detailed(phone, self.registries)
+                self.assertIsNone(r.record)
+                self.assertIsNone(r.cleaned, f"{phone!r} leaked as MAC: {r.cleaned}")
+
+
 class TestWebDataBundle(unittest.TestCase):
     """If the PWA data bundle is present, it must agree with the source CSVs."""
 

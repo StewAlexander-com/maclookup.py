@@ -45,11 +45,13 @@ const factory = new Function(`
   return {
     normalizeMac, extractMacCandidate, extractMacCandidates, isHexish,
     hasMacishGrouping, normalizedInputIsMacShaped,
+    maybePadSingleNibbleOctets, classifyMac,
   };
 `);
 const {
   normalizeMac, extractMacCandidate, extractMacCandidates, isHexish,
   hasMacishGrouping, normalizedInputIsMacShaped,
+  maybePadSingleNibbleOctets, classifyMac,
 } = factory();
 
 // ---- normalizeMac symmetry with the Python normalize_mac ----
@@ -330,5 +332,74 @@ for (const phone of [
 const macMissProbe = simulateHandleQuery('FF:FF:FF:FF:FF:FF');
 assert(macMissProbe.path === 'mac' && /prefix FFFFFFFFF\./.test(macMissProbe.message),
        `real-MAC miss should still show prefix message, got ${JSON.stringify(macMissProbe)}`);
+
+// ---- Single-nibble ARP-form padding (fe:35:b6:60:f:ee) ----
+// The Apple MacBook ARP-table form is the user-reported regression: one
+// octet is shrunk from "0f" to "f". maybePadSingleNibbleOctets pads each
+// short octet back to two hex chars and yields the full 12-hex MAC.
+assert(maybePadSingleNibbleOctets('fe:35:b6:60:f:ee') === 'FE35B6600FEE',
+       'Apple ARP single-nibble form padded');
+assert(maybePadSingleNibbleOctets('0:1a:2b:3c:4d:5e') === '001A2B3C4D5E',
+       'leading short octet padded');
+assert(maybePadSingleNibbleOctets('0-1a-2b-3c-4d-5e') === '001A2B3C4D5E',
+       'hyphen separators with leading short octet padded');
+// Pure digits with single-nibble groups are ambiguous — must not pad.
+assert(maybePadSingleNibbleOctets('1:2:3:4:5:6') === null,
+       'pure-digit single-nibble shape rejected');
+// Five groups — wrong count, even with hex letters.
+assert(maybePadSingleNibbleOctets('fe:35:b6:60:f') === null,
+       'five groups not enough');
+// A group with three digits — outside 1-2 range.
+assert(maybePadSingleNibbleOctets('fe:35:b66:60:f:ee') === null,
+       'three-char group rejected');
+
+// End-to-end: the extractor must surface the padded form.
+const arpCands = extractMacCandidates('fe:35:b6:60:f:ee');
+assert(arpCands.length > 0 && arpCands[0].hex === 'FE35B6600FEE',
+       `ARP single-nibble extract: got ${JSON.stringify(arpCands)}`);
+const leadCands = extractMacCandidates('0:1a:2b:3c:4d:5e');
+assert(leadCands.length > 0 && leadCands[0].hex === '001A2B3C4D5E',
+       `leading-short extract: got ${JSON.stringify(leadCands)}`);
+
+// The bare-normalize gate must REJECT single-nibble shapes so the lookup
+// uses the candidate extractor (which pads) instead of stripping
+// separators and shifting the prefix.
+assert(normalizedInputIsMacShaped('fe:35:b6:60:f:ee') === false,
+       'bare-normalize must reject single-nibble shape');
+assert(normalizedInputIsMacShaped('0:1a:2b:3c:4d:5e') === false,
+       'bare-normalize must reject leading-short shape');
+// Real MACs without single-nibble groups still pass.
+assert(normalizedInputIsMacShaped('fe:35:b6:60:0f:ee') === true,
+       'fully-padded MAC still passes bare-normalize gate');
+
+// ---- MAC classification ----
+assert(classifyMac('FE35B6600FEE') === 'laa',
+       'FE first byte → locally administered');
+assert(classifyMac('02C08C000001') === 'laa',
+       '02 first byte → locally administered');
+assert(classifyMac('FFFFFFFFFFFF') === 'broadcast',
+       'broadcast classified');
+assert(classifyMac('000000000000') === 'all-zero',
+       'all-zero classified');
+assert(classifyMac('01005E000001') === 'multicast',
+       'IPv4 multicast 01:00:5E classified');
+assert(classifyMac('333300000001') === 'multicast-laa',
+       'IPv6 multicast 33:33 classified as multicast+laa');
+assert(classifyMac('001A2B3C4D5E') === '',
+       'globally administered unicast → no special class');
+assert(classifyMac('FE35B6') === '',
+       'partial MAC → no classification');
+assert(classifyMac('') === '', 'empty input → no classification');
+assert(classifyMac(null) === '', 'null input → no classification');
+
+// isHexish should still route single-nibble shapes to the hex path
+// because the candidate extractor surfaces a valid MAC for them.
+assert(isHexish('fe:35:b6:60:f:ee') === true,
+       'single-nibble ARP form routes to hex path');
+assert(isHexish('0:1a:2b:3c:4d:5e') === true,
+       'leading-short shape routes to hex path');
+// But pure-digit single-nibble must route to fuzzy (no candidate).
+assert(isHexish('1:2:3:4:5:6') === false,
+       'pure-digit single-nibble routes to fuzzy path');
 
 console.log('mac_formats.mjs OK');
